@@ -9,18 +9,54 @@ const COLLECTIONS = {
 const IMAGE_EXTENSIONS = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
 const AUDIO_EXTENSIONS = { "audio/mpeg": "mp3", "audio/wav": "wav", "audio/x-wav": "wav", "audio/mp4": "m4a", "audio/x-m4a": "m4a" };
 
+class OutfitNotFoundError extends Error {}
+class OutfitAlreadyUploadedError extends Error {}
+
 function createOutfitStore(db, bucket) {
   const urlFor = (path) =>
     `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(path)}?alt=media`;
 
+  function validateDraft(detailsSnapshot, mediaSnapshot, userId) {
+    const details = detailsSnapshot.data();
+    if (!detailsSnapshot.exists || details.userId !== userId) throw new OutfitNotFoundError();
+    if (details.status === "uploaded") throw new OutfitAlreadyUploadedError();
+    if (details.status !== "pending" || !mediaSnapshot.exists) {
+      throw new Error("Outfit draft is in an invalid state");
+    }
+    return { details, media: mediaSnapshot.data() };
+  }
+
   return {
-    async save({ userId, image, mimeType, analysis, outfitName, occasion, category, audio }) {
+    async createDraft({ userId, outfitName, occasion, category }) {
       const outfitId = randomUUID();
-      const mediaId = randomUUID();
+      const now = new Date();
+      const outfit = { outfitId, userId, outfitName, occasion, category, createdAt: now, status: "pending" };
+      const media = {
+        mediaId: outfitId, outfitId, type: "photo", PhotoStoragePath: "", PhotoUrl: "",
+        AudioStoragePath: "", AudioUrl: "", uploadedAt: null,
+      };
+      const batch = db.batch();
+      batch.create(db.collection(COLLECTIONS.details).doc(outfitId), outfit);
+      batch.create(db.collection(COLLECTIONS.media).doc(outfitId), media);
+      await batch.commit();
+      return { outfit, media };
+    },
+
+    async getDraft({ outfitId, userId }) {
+      const detailsRef = db.collection(COLLECTIONS.details).doc(outfitId);
+      const mediaRef = db.collection(COLLECTIONS.media).doc(outfitId);
+      const [details, media] = await Promise.all([detailsRef.get(), mediaRef.get()]);
+      validateDraft(details, media, userId);
+    },
+
+    async save({ userId, image, mimeType, analysis, outfitName, occasion, category, audio, outfitId: draftId }) {
+      const outfitId = draftId || randomUUID();
+      const mediaId = draftId || randomUUID();
       const analysisId = randomUUID();
       const scoreId = randomUUID();
-      const photoPath = `outfits/${outfitId}/photos/front.${IMAGE_EXTENSIONS[mimeType] || "bin"}`;
-      const audioPath = audio ? `outfits/${outfitId}/audio/voice-note.${AUDIO_EXTENSIONS[audio.mimeType] || "bin"}` : "";
+      const attemptPath = draftId ? `${analysisId}/` : "";
+      const photoPath = `outfits/${outfitId}/photos/${attemptPath}front.${IMAGE_EXTENSIONS[mimeType] || "bin"}`;
+      const audioPath = audio ? `outfits/${outfitId}/audio/${attemptPath}voice-note.${AUDIO_EXTENSIONS[audio.mimeType] || "bin"}` : "";
       const refs = {
         details: db.collection(COLLECTIONS.details).doc(outfitId),
         media: db.collection(COLLECTIONS.media).doc(mediaId),
@@ -28,6 +64,7 @@ function createOutfitStore(db, bucket) {
         scores: db.collection(COLLECTIONS.scores).doc(scoreId),
       };
       const filesToDelete = new Set();
+      let draftCommitStarted = false;
       async function saveFile(path, data, contentType) {
         const target = bucket.file(path);
         filesToDelete.add(target);
@@ -48,7 +85,7 @@ function createOutfitStore(db, bucket) {
         const now = new Date();
         const { scores, ...feedback } = analysis;
         const photoUrl = urlFor(photoPath);
-        const details = {
+        let details = {
           outfitId, userId, createdAt: now, status: "uploaded",
           outfitName: outfitName || "", occasion: occasion || "", category: category || "",
         };
@@ -65,15 +102,34 @@ function createOutfitStore(db, bucket) {
           strengths: feedback.strengths, next_direction: feedback.next_direction, created_at: now,
         };
         const scoresRecord = { score_id: scoreId, analysis_id: analysisId, ...scores, created_at: now };
-        // One atomic commit so a partial outfit never appears in Firestore.
-        const batch = db.batch();
-        batch.set(refs.details, details);
-        batch.set(refs.media, media);
-        batch.set(refs.analysis, analysisRecord);
-        batch.set(refs.scores, scoresRecord);
-        await batch.commit();
+        if (draftId) {
+          draftCommitStarted = true;
+          details = await db.runTransaction(async (transaction) => {
+            const detailsSnapshot = await transaction.get(refs.details);
+            const mediaSnapshot = await transaction.get(refs.media);
+            const draft = validateDraft(detailsSnapshot, mediaSnapshot, userId);
+            transaction.update(refs.details, { status: "uploaded" });
+            transaction.set(refs.media, media);
+            transaction.create(refs.analysis, analysisRecord);
+            transaction.create(refs.scores, scoresRecord);
+            return { ...draft.details, status: "uploaded" };
+          });
+          if (typeof details.createdAt?.toDate === "function") details.createdAt = details.createdAt.toDate();
+        } else {
+          const batch = db.batch();
+          batch.set(refs.details, details);
+          batch.set(refs.media, media);
+          batch.set(refs.analysis, analysisRecord);
+          batch.set(refs.scores, scoresRecord);
+          await batch.commit();
+        }
         return { outfit: details, media, analysis: analysisRecord, scores: scoresRecord };
       } catch (error) {
+        if (draftCommitStarted && !(error instanceof OutfitNotFoundError) &&
+            !(error instanceof OutfitAlreadyUploadedError)) {
+          console.error(`Draft commit outcome unknown for ${outfitId}; uploaded files require reconciliation`);
+          throw error;
+        }
         const cleanup = await Promise.allSettled(
           Array.from(filesToDelete, (target) => target.delete({ ignoreNotFound: true })),
         );
@@ -88,4 +144,4 @@ function createOutfitStore(db, bucket) {
   };
 }
 
-module.exports = { createOutfitStore, COLLECTIONS };
+module.exports = { createOutfitStore, COLLECTIONS, OutfitNotFoundError, OutfitAlreadyUploadedError };

@@ -47,11 +47,47 @@ There is **no** `X-Dev-User` bypass: no existing implementation was present in
 this repository. Token verification failures return 401; infrastructure
 failures return 500.
 
-`POST /analyze` expects `multipart/form-data` with:
+### Two-step upload
+
+1. Send `POST /outfits` with a Firebase ID token and a JSON object containing
+   `outfitName`, `occasion`, and `category`. These fields are optional; when
+   supplied, each must be nonempty and at most 100 characters. Unknown fields
+   are rejected. The backend takes the user ID from the token.
+2. The response is `201` with `outfit` and `media`. The outfit has a random
+   `outfitId` and `status: "pending"`. The media record has empty photo and audio
+   paths and URLs, and `uploadedAt: null`. No image has been uploaded yet.
+3. Send `POST /analyze` with the same user's token, an image, and the draft's
+   `outfitId`. Do not send `outfitName`, `occasion`, or `category` in this
+   request; the saved draft supplies them.
+4. On success, the response is `201` with `outfit`, `media`, `analysis`, and
+   `scores`. The outfit becomes `uploaded`, the media record is filled in, and
+   the analysis and scores records are created atomically in Firestore.
+
+```sh
+curl -X POST http://localhost:5001/outfits \
+  -H "Authorization: Bearer <FIREBASE_ID_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"outfitName":"Summer Casual","occasion":"Party","category":"Casual"}'
+
+curl -X POST http://localhost:5001/analyze \
+  -H "Authorization: Bearer <FIREBASE_ID_TOKEN>" \
+  -F "image=@outfit.jpg;type=image/jpeg" \
+  -F "outfitId=<outfitId from the first response>"
+```
+
+Only the draft owner can complete it. A missing or another user's draft returns
+`404`; an already completed draft returns `409`. Concurrent attempts cannot
+both complete the same draft. If analysis fails, the draft remains pending.
+
+### One-step upload
+
+Existing clients can continue using `POST /analyze` without creating a draft.
+It expects `multipart/form-data` with:
 
 | Field | Required | Notes |
 |---|---|---|
 | `image` | yes | JPEG, PNG or WebP, at most 5 MiB. Signature and MIME type must match. |
+| `outfitId` | no | UUID of a pending draft. Cannot be combined with the detail fields below. |
 | `outfitName` | no | Text, at most 100 characters. |
 | `occasion` | no | Text, at most 100 characters (e.g. `Party`). |
 | `category` | no | Text, at most 100 characters (e.g. `Casual`). |
@@ -70,15 +106,16 @@ curl -X POST http://localhost:5001/analyze \
 
 ### Firestore collections
 
-Each upload writes one linked record to each collection:
+Each completed upload has one linked record in each collection:
 
 - `fitcheck_outfit_details`: `outfitId`, `userId`, `outfitName`, `occasion`,
   `category`, `createdAt` (Timestamp), `status` (`uploaded`).
 - `fitcheck_outfit_media`: `mediaId`, `outfitId`, `type` (`photo`),
   `PhotoStoragePath`, `PhotoUrl`, `AudioStoragePath`, `AudioUrl` (empty when no
-  voice note), `uploadedAt`. Files are stored at
-  `outfits/<outfitId>/photos/front.<ext>` and
-  `outfits/<outfitId>/audio/voice-note.<ext>`.
+  voice note), `uploadedAt`. For a pending draft, the paths and URLs are empty
+  and `uploadedAt` is null. Draft media uses `outfitId` as its `mediaId`.
+  Files are stored under `outfits/<outfitId>/photos/` and
+  `outfits/<outfitId>/audio/`.
 - `fitcheck_outfit_analysis`: `analysis_id`, `outfit_id`, `user_id`, `image_url`,
   `style_category`, `outfit_title`, `overall_score` (0-100), `summary`,
   `color_description`, `primary_colors`, `strengths`, `next_direction`,
@@ -106,9 +143,13 @@ Invalid uploads return `400`, unsupported or mismatched file types `415`, and
 oversized files `413`. Unexpected failures return `500`; details are logged on
 the server, not returned to the client.
 
-The server analyzes first, so nothing is stored when analysis fails. It then
-uploads the files and writes the four Firestore records in a single batch. If
-the batch fails it deletes the uploaded files; failures are logged. Firestore
-and Cloud Storage have no cross-service transaction, so a crash or failed
-cleanup can leave orphaned files. The API has no idempotency, so retries can
-create duplicate outfits.
+For one-step uploads, the server analyzes first, then uploads files and writes
+the four Firestore records in a single batch. For drafts, details and empty media
+are saved before upload; successful completion updates them and adds analysis
+and scores in a transaction. Upload failures attempt to clean up their files.
+If a draft transaction's outcome is uncertain, files are retained to avoid
+deleting a potentially committed image; operators must reconcile them.
+Firestore and Cloud Storage have no cross-service transaction, so a crash or
+failed cleanup can leave orphaned files. One-step retries can create duplicates.
+
+Run the local backend tests with `npm test` from `Fitcheck/`.
