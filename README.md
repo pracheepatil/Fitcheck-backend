@@ -47,57 +47,68 @@ There is **no** `X-Dev-User` bypass: no existing implementation was present in
 this repository. Token verification failures return 401; infrastructure
 failures return 500.
 
-`POST /analyze` expects `multipart/form-data` containing exactly one file field
-named `image`. JPEG, PNG, and WebP files up to 5 MiB are accepted. The file's
-signature and declared MIME type must match. Signature validation is not a
-complete image decode or malware scan.
+`POST /analyze` expects `multipart/form-data` with:
+
+| Field | Required | Notes |
+|---|---|---|
+| `image` | yes | JPEG, PNG or WebP, at most 5 MiB. Signature and MIME type must match. |
+| `outfitName` | no | Text, at most 100 characters. |
+| `occasion` | no | Text, at most 100 characters (e.g. `Party`). |
+| `category` | no | Text, at most 100 characters (e.g. `Casual`). |
+| `audio` | no | Voice note: MP3, WAV or M4A, at most 25 MiB. |
+
+Unknown fields are rejected with `400`. The default port is `5001` (macOS uses
+5000 for AirPlay). Browser clients are allowed only from the origins listed in
+`CORS_ALLOWED_ORIGINS` (comma-separated, for example `http://localhost:3000`).
 
 ```sh
-curl -X POST http://localhost:5000/analyze \
-  -H "Authorization: Bearer $FIREBASE_ID_TOKEN" \
-  -F "image=@outfit.jpg;type=image/jpeg"
+curl -X POST http://localhost:5001/analyze \
+  -H "Authorization: Bearer <FIREBASE_ID_TOKEN>" \
+  -F "image=@outfit.jpg;type=image/jpeg" \
+  -F "outfitName=Summer Casual" -F "occasion=Party" -F "category=Casual"
 ```
 
-Successful requests return `201` with:
+### Firestore collections
+
+Each upload writes one linked record to each collection:
+
+- `fitcheck_outfit_details`: `outfitId`, `userId`, `outfitName`, `occasion`,
+  `category`, `createdAt` (Timestamp), `status` (`uploaded`).
+- `fitcheck_outfit_media`: `mediaId`, `outfitId`, `type` (`photo`),
+  `PhotoStoragePath`, `PhotoUrl`, `AudioStoragePath`, `AudioUrl` (empty when no
+  voice note), `uploadedAt`. Files are stored at
+  `outfits/<outfitId>/photos/front.<ext>` and
+  `outfits/<outfitId>/audio/voice-note.<ext>`.
+- `fitcheck_outfit_analysis`: `analysis_id`, `outfit_id`, `user_id`, `image_url`,
+  `style_category`, `outfit_title`, `overall_score` (0-100), `summary`,
+  `color_description`, `primary_colors`, `strengths`, `next_direction`,
+  `created_at`.
+- `fitcheck_outfit_analysis_scores`: `score_id`, `analysis_id`,
+  `color_harmony_score`, `style_matching_score`, `balance_layering_score`,
+  `accessories_score` (each 0-100), `created_at`.
+
+Successful requests return `201` with the four records:
 
 ```json
 {
-  "outfit": {
-    "id": "generated-uuid",
-    "userId": "firebase-user-id",
-    "storagePath": "outfits/generated-uuid",
-    "mimeType": "image/jpeg",
-    "status": "complete",
-    "createdAt": "2026-01-01T00:00:00.000Z",
-    "analysis": {
-      "summary": "A short outfit summary.",
-      "strengths": ["A positive detail."],
-      "suggestions": ["A constructive suggestion."],
-      "colorPalette": ["blue", "white"]
-    }
-  }
+  "outfit": { "outfitId": "uuid", "userId": "firebase-uid", "outfitName": "Summer Casual", "occasion": "Party", "category": "Casual", "createdAt": "2026-01-01T00:00:00.000Z", "status": "uploaded" },
+  "media": { "mediaId": "uuid", "outfitId": "uuid", "type": "photo", "PhotoStoragePath": "outfits/<id>/photos/front.jpg", "PhotoUrl": "https://firebasestorage.googleapis.com/...", "AudioStoragePath": "", "AudioUrl": "", "uploadedAt": "2026-01-01T00:00:00.000Z" },
+  "analysis": { "analysis_id": "uuid", "outfit_id": "uuid", "user_id": "firebase-uid", "image_url": "https://...", "style_category": "Casual", "outfit_title": "The everyday edit", "overall_score": 82, "summary": "...", "color_description": "...", "primary_colors": ["blue"], "strengths": ["..."], "next_direction": "...", "created_at": "2026-01-01T00:00:00.000Z" },
+  "scores": { "score_id": "uuid", "analysis_id": "uuid", "color_harmony_score": 90, "style_matching_score": 80, "balance_layering_score": 75, "accessories_score": 60, "created_at": "2026-01-01T00:00:00.000Z" }
 }
 ```
 
-The storage path is not a public URL. Clients cannot read private objects using
-this endpoint; a future authenticated retrieval or signed-URL flow must enforce
-ownership. This change does not wire the separate frontend, whose placeholder
-API differs from this endpoint.
+`PhotoUrl` points at the private bucket and is not publicly readable. A future
+authenticated retrieval or signed-URL flow must enforce ownership. Voice notes
+are stored but not analyzed.
 
-Invalid uploads return `400`, unsupported or mismatched image types return
-`415`, and oversized images return `413`. Unexpected service failures return
-`500`; error details are logged on the server, not returned to the client.
+Invalid uploads return `400`, unsupported or mismatched file types `415`, and
+oversized files `413`. Unexpected failures return `500`; details are logged on
+the server, not returned to the client.
 
-To avoid storing an outfit when analysis fails, the server analyzes first.
-It then creates a pending Firestore record, uploads the image, and marks the
-record complete. On persistence failure it attempts to delete the record and
-object; failures are logged. Firestore and Cloud Storage do not provide a
-cross-service transaction: crashes, ambiguous network failures, or failed
-cleanup can leave orphaned objects or records. Operators should monitor logs
-and reconcile pending records / orphaned objects. The API does not provide
-idempotency, so retries can create duplicate outfits.
-
-Run unit and local HTTP integration tests with `npm test` from `Fitcheck/`.
-They use fake Firebase services and a fake ADK model; an actual Firebase project,
-private bucket, Firebase user token, and Gemini API key are needed for a
-separate end-to-end verification.
+The server analyzes first, so nothing is stored when analysis fails. It then
+uploads the files and writes the four Firestore records in a single batch. If
+the batch fails it deletes the uploaded files; failures are logged. Firestore
+and Cloud Storage have no cross-service transaction, so a crash or failed
+cleanup can leave orphaned files. The API has no idempotency, so retries can
+create duplicate outfits.
