@@ -1,0 +1,9 @@
+# Dependencies
+node_modules/
+
+# Environment files (keep the example template tracked)
+**/.env
+**/.env.*
+
+# Firebase service-account credentials
+**/config/serviceAccountKey.json

@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 const express = require("express");
 const { createAnalyzeRouter } = require("./routes/analyze");
 
@@ -24,6 +25,27 @@ function createApp(dependencies, { allowedOrigins = [] } = {}) {
   });
   return app;
 }
+=======
+import cors from "cors";
+import express from "express";
+import authRoutes from "./routes/authRoutes.js";
+import firebaseTestRoutes from "./routes/firebaseTestRoutes.js";
+import fitcheckRoutes from "./routes/fitcheckRoutes.js";
+
+const app = express();
+const port = process.env.PORT || 3000;
+
+app.use(
+  cors({
+    origin: [
+      "http://localhost:3000",
+      "http://localhost:5173"
+    ],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+  })
+);
+>>>>>>> 5f24de8dd685b96dfff94ab234a34a580d285b7a
 
 if (require.main === module) {
   try {
@@ -38,4 +60,21 @@ if (require.main === module) {
   }
 }
 
+<<<<<<< HEAD
 module.exports = { createApp };
+=======
+app.use("/api/auth", authRoutes);
+app.use("/api", firebaseTestRoutes);
+app.use("/api", fitcheckRoutes);
+
+app.get("/api/health", (req, res) => {
+  res.json({
+    success: true,
+    message: "FitCheck backend is running"
+  });
+});
+
+app.listen(port, () => {
+  console.log(`FitCheck backend running on port ${port}`);
+});
+>>>>>>> 5f24de8dd685b96dfff94ab234a34a580d285b7a
