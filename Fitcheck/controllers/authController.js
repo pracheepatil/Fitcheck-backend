@@ -1,12 +1,12 @@
-import {
+const {
   AuthServiceError,
   createSession,
   runFirebaseTest,
   signIn,
   signUp
-} from "../services/authService.js";
+} = require("../services/authService");
 
-export async function signInController(req, res) {
+async function signInController(req, res) {
   const { email, password } = req.body ?? {};
 
   if (
@@ -105,7 +105,7 @@ export async function signInController(req, res) {
   }
 }
 
-export async function signUpController(req, res) {
+async function signUpController(req, res) {
   const { email, password, fullName } = req.body ?? {};
 
   if (
@@ -163,7 +163,7 @@ export async function signUpController(req, res) {
   }
 }
 
-export async function createSessionController(req, res) {
+async function createSessionController(req, res) {
   try {
     const user = await createSession(req.firebaseUser);
 
@@ -182,7 +182,7 @@ export async function createSessionController(req, res) {
   }
 }
 
-export async function firebaseTestController(req, res) {
+async function firebaseTestController(req, res) {
   try {
     await runFirebaseTest();
 
@@ -198,4 +198,7 @@ export async function firebaseTestController(req, res) {
       message: error.message
     });
   }
+
 }
+
+module.exports = { signInController, signUpController, createSessionController, firebaseTestController };

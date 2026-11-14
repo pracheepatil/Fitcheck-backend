@@ -1,19 +1,19 @@
-import "dotenv/config";
-import {
+const {
   getApps,
   initializeApp,
   applicationDefault
-} from "firebase-admin/app";
-import { getAuth } from "firebase-admin/auth";
-import { getFirestore } from "firebase-admin/firestore";
+} = require("firebase-admin/app");
+const { getAuth } = require("firebase-admin/auth");
+const { getFirestore } = require("firebase-admin/firestore");
 
 const firebaseApp =
   getApps().length > 0
     ? getApps()[0]
     : initializeApp({
         credential: applicationDefault(),
-        projectId: process.env.REACT_APP_FIREBASE_PROJECT_ID
+        projectId: process.env.GOOGLE_CLOUD_PROJECT || process.env.REACT_APP_FIREBASE_PROJECT_ID
       });
 
-export const firebaseAuth = getAuth(firebaseApp);
-export const db = getFirestore(firebaseApp);
+const firebaseAuth = getAuth(firebaseApp);
+const db = getFirestore(firebaseApp);
+module.exports = { firebaseAuth, db };

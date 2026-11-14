@@ -1,11 +1,11 @@
-import express from "express";
-import {
+const express = require("express");
+const {
   createSessionController,
   firebaseTestController,
   signInController,
   signUpController
-} from "../controllers/authController.js";
-import { verifyFirebaseToken } from "../middleware/verifyFirebaseToken.js";
+} = require("../controllers/authController");
+const { verifyFirebaseToken } = require("../middleware/verifyFirebaseToken");
 
 const router = express.Router();
 
@@ -14,4 +14,4 @@ router.post("/signup", signUpController);
 router.post("/session", verifyFirebaseToken, createSessionController);
 router.get("/firebase-test", firebaseTestController);
 
-export default router;
+module.exports = router;

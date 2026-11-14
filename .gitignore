@@ -1,9 +1,6 @@
 node_modules/
 .env
-<<<<<<< HEAD
 .env.*
 !.env.example
 *.service-account.json
-=======
 config/serviceAccountKey.json
->>>>>>> 5f24de8dd685b96dfff94ab234a34a580d285b7a

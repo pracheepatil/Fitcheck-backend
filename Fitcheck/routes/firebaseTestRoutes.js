@@ -1,5 +1,5 @@
-import express from "express";
-import { db } from "../config/firebaseAdmin.js";
+const express = require("express");
+const { db } = require("../config/firebaseAdmin");
 
 const router = express.Router();
 
@@ -25,4 +25,4 @@ router.get("/firebase-test", async (req, res) => {
   }
 });
 
-export default router;
+module.exports = router;

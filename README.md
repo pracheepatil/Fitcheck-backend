@@ -38,6 +38,8 @@ URL. Set `GEMINI_MODEL` to an available Gemini API model that supports image
 input and structured output. `GOOGLE_GENAI_USE_VERTEXAI` must not be enabled.
 The backend does not create the bucket, provision Firebase, or set security
 rules. The Node version requirement follows Google ADK's TypeScript quickstart.
+Email/password sign-in also requires `FIREBASE_WEB_API_KEY` from the same
+Firebase project and the email/password provider enabled in Firebase Auth.
 
 ## API
 
@@ -46,6 +48,11 @@ The backend verifies it and checks revocation using the Firebase Admin SDK.
 There is **no** `X-Dev-User` bypass: no existing implementation was present in
 this repository. Token verification failures return 401; infrastructure
 failures return 500.
+
+The merged backend also exposes `POST /api/auth/signup` (JSON `email`,
+`password`, `fullName`), `POST /api/auth/signin` (JSON `email`, `password`),
+and `POST /api/auth/session` (Firebase ID token). `GET /api/health` checks
+that the server is responding.
 
 ### Two-step upload
 

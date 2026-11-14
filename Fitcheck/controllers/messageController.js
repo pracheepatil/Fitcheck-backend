@@ -1,8 +1,8 @@
-import { saveMessage } from "../services/messageService.js";
+const { saveMessage } = require("../services/messageService");
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-export async function sendMessageController(req, res) {
+async function sendMessageController(req, res) {
   const { name, email, subject, message } = req.body ?? {};
 
   if (
@@ -43,3 +43,5 @@ export async function sendMessageController(req, res) {
     });
   }
 }
+
+module.exports = { sendMessageController };
