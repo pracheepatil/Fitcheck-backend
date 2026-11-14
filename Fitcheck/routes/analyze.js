@@ -97,7 +97,19 @@ function createAnalyzeRouter({ auth, analyze, store }) {
         ...(req.body.category ? { category: req.body.category.trim() } : {}),
         ...(audio ? { audio: { buffer: audio.buffer, mimeType: audio.mimetype } } : {}),
       });
-      return res.status(201).json(saved);
+      if (req.body.outfitId) return res.status(201).json(saved);
+      return res.status(201).json({
+        ...saved,
+        outfit: {
+          ...saved.outfit,
+          analysis: {
+            summary: analysis.summary,
+            strengths: analysis.strengths,
+            suggestions: [analysis.next_direction],
+            colorPalette: analysis.primary_colors,
+          },
+        },
+      });
     } catch (error) {
       return sendStoreError(error, res, next);
     }

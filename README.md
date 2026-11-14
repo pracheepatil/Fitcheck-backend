@@ -104,6 +104,13 @@ curl -X POST http://localhost:5001/analyze \
   -F "outfitName=Summer Casual" -F "occasion=Party" -F "category=Casual"
 ```
 
+For compatibility with older frontends, the one-step response also contains
+`outfit.analysis` with `summary`, `strengths`, `suggestions` (an array containing
+`next_direction`), and `colorPalette` (the `primary_colors` array). This field
+is a response-only alias; the Firestore details record is unchanged. The full
+analysis remains available in the top-level `analysis` and `scores` objects.
+The older frontend uses the one-step flow; it does not create drafts.
+
 ### Firestore collections
 
 Each completed upload has one linked record in each collection:

@@ -123,6 +123,7 @@ test("creates pending details and empty media before the upload, then completes 
   assert.equal(saved.outfit.outfitId, outfit.outfitId);
   assert.equal(saved.outfit.outfitName, "Weekend");
   assert.equal(saved.outfit.status, "uploaded");
+  assert.equal(saved.outfit.analysis, undefined);
   assert.equal(saved.media.mediaId, media.mediaId);
   assert.equal(saved.analysis.outfit_id, outfit.outfitId);
   assert.equal(saved.scores.analysis_id, saved.analysis.analysis_id);
@@ -202,8 +203,18 @@ test("retains files when the draft transaction outcome is uncertain", async () =
 });
 
 test("preserves one-step uploads and rejects invalid draft requests", async (t) => {
-  const { url } = await setup(t);
-  assert.equal((await upload(url, "alice", { outfitName: "Old flow", occasion: "Party", category: "Casual" })).status, 201);
+  const { db, url } = await setup(t);
+  const response = await upload(url, "alice", { outfitName: "Old flow", occasion: "Party", category: "Casual" });
+  assert.equal(response.status, 201);
+  const result = await response.json();
+  assert.deepEqual(result.outfit.analysis, {
+    summary: analysis.summary,
+    strengths: analysis.strengths,
+    suggestions: [analysis.next_direction],
+    colorPalette: analysis.primary_colors,
+  });
+  assert.equal(result.analysis.next_direction, analysis.next_direction);
+  assert.equal(db.records.get(`fitcheck_outfit_details/${result.outfit.outfitId}`).analysis, undefined);
   assert.equal((await upload(url, "alice", { outfitId: "not-an-id" })).status, 400);
   assert.equal((await fetch(`${url}/outfits`, {
     method: "POST", headers: { Authorization: "Bearer alice", "Content-Type": "application/json" }, body: "{",
