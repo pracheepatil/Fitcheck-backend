@@ -1,7 +1,7 @@
-import { FieldValue } from "firebase-admin/firestore";
-import { db, firebaseAuth } from "../config/firebaseAdmin.js";
+const { FieldValue } = require("firebase-admin/firestore");
+const { db, firebaseAuth } = require("../config/firebaseAdmin");
 
-export class AuthServiceError extends Error {
+class AuthServiceError extends Error {
   constructor(code, options) {
     super(code, options);
     this.name = "AuthServiceError";
@@ -9,7 +9,7 @@ export class AuthServiceError extends Error {
   }
 }
 
-export async function signIn(email, password) {
+async function signIn(email, password) {
   const apiKey = process.env.FIREBASE_WEB_API_KEY;
 
   if (!apiKey) {
@@ -47,7 +47,7 @@ export async function signIn(email, password) {
   }
 }
 
-export async function signUp(email, password, fullName) {
+async function signUp(email, password, fullName) {
   const createdUser = await firebaseAuth.createUser({
     email: email.trim().toLowerCase(),
     password,
@@ -77,7 +77,7 @@ export async function signUp(email, password, fullName) {
   return createdUser;
 }
 
-export async function createSession(firebaseUser) {
+async function createSession(firebaseUser) {
   const { uid, email, name, picture } = firebaseUser;
   const userReference = db.collection("users").doc(uid);
   const userSnapshot = await userReference.get();
@@ -103,10 +103,12 @@ export async function createSession(firebaseUser) {
   return updatedUser.data();
 }
 
-export async function runFirebaseTest() {
+async function runFirebaseTest() {
   await db.collection("system").doc("test").set({
     project: "fitcheck-685be",
     message: "Firebase Admin is connected",
     createdAt: new Date().toISOString()
   });
 }
+
+module.exports = { AuthServiceError, signIn, signUp, createSession, runFirebaseTest };

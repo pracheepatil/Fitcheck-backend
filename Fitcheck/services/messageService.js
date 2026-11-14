@@ -1,7 +1,7 @@
-import { FieldValue } from "firebase-admin/firestore";
-import { db } from "../config/firebaseAdmin.js";
+const { FieldValue } = require("firebase-admin/firestore");
+const { db } = require("../config/firebaseAdmin");
 
-export async function saveMessage({ name, email, subject, message }) {
+async function saveMessage({ name, email, subject, message }) {
   const messageReference = await db.collection("fitcheck_messages").add({
     name,
     email,
@@ -12,3 +12,5 @@ export async function saveMessage({ name, email, subject, message }) {
 
   return messageReference.id;
 }
+
+module.exports = { saveMessage };

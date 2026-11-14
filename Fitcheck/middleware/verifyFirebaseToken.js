@@ -1,6 +1,6 @@
-import { firebaseAuth } from "../config/firebaseAdmin.js";
+const { firebaseAuth } = require("../config/firebaseAdmin");
 
-export async function verifyFirebaseToken(req, res, next) {
+async function verifyFirebaseToken(req, res, next) {
   try {
     const authorizationHeader = req.headers.authorization;
 
@@ -31,3 +31,5 @@ export async function verifyFirebaseToken(req, res, next) {
     });
   }
 }
+
+module.exports = { verifyFirebaseToken };
