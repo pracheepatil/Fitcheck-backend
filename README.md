@@ -1,9 +1,8 @@
 # FitCheck backend: outfit analysis
 
-The `api-fit-analyze` branch provides an authenticated `POST /analyze` endpoint.
-It accepts an outfit photo, analyzes it with Gemini through Google ADK, and
-saves the image to a private Cloud Storage for Firebase / Google Cloud Storage
-bucket and the resulting metadata to Firestore.
+The backend accepts outfit photos, analyzes them with Gemini through Google
+ADK, and saves files in a private Firebase Storage bucket and metadata in
+Firestore. Saved analyses can be retrieved separately.
 
 ## Setup
 
@@ -54,81 +53,96 @@ The merged backend also exposes `POST /api/auth/signup` (JSON `email`,
 and `POST /api/auth/session` (Firebase ID token). `GET /api/health` checks
 that the server is responding.
 
-### Two-step upload
+### Submit an outfit
 
-1. Send `POST /outfits` with a Firebase ID token and a JSON object containing
-   `outfitName`, `occasion`, and `category`. These fields are optional; when
-   supplied, each must be nonempty and at most 100 characters. Unknown fields
-   are rejected. The backend takes the user ID from the token.
-2. The response is `201` with `outfit` and `media`. The outfit has a random
-   `outfitId` and `status: "pending"`. The media record has empty photo and audio
-   paths and URLs, and `uploadedAt: null`. No image has been uploaded yet.
-3. Send `POST /analyze` with the same user's token, an image, and the draft's
-   `outfitId`. Do not send `outfitName`, `occasion`, or `category` in this
-   request; the saved draft supplies them.
-4. On success, the response is `201` with `outfit`, `media`, `analysis`, and
-   `scores`. The outfit becomes `uploaded`, the media record is filled in, and
-   the analysis and scores records are created atomically in Firestore.
-
-```sh
-curl -X POST http://localhost:5001/outfits \
-  -H "Authorization: Bearer <FIREBASE_ID_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"outfitName":"Summer Casual","occasion":"Party","category":"Casual"}'
-
-curl -X POST http://localhost:5001/analyze \
-  -H "Authorization: Bearer <FIREBASE_ID_TOKEN>" \
-  -F "image=@outfit.jpg;type=image/jpeg" \
-  -F "outfitId=<outfitId from the first response>"
-```
-
-Only the draft owner can complete it. A missing or another user's draft returns
-`404`; an already completed draft returns `409`. Concurrent attempts cannot
-both complete the same draft. If analysis fails, the draft remains pending.
-
-### One-step upload
-
-Existing clients can continue using `POST /analyze` without creating a draft.
-It expects `multipart/form-data` with:
+`POST /analyze` (also `/api/analyze`) requires `application/json`. The backend
+gets the user ID from the verified token and generates a new UUID for each
+submission. Do not send an `outfitId`. `image` and optional `audio` must be
+HTTPS URLs that the backend can fetch; the URLs must return the actual media
+files.
 
 | Field | Required | Notes |
 |---|---|---|
-| `image` | yes | JPEG, PNG or WebP, at most 5 MiB. Signature and MIME type must match. |
-| `outfitId` | no | UUID of a pending draft. Cannot be combined with the detail fields below. |
-| `outfitName` | no | Text, at most 100 characters. |
-| `occasion` | no | Text, at most 100 characters (e.g. `Party`). |
-| `category` | no | Text, at most 100 characters (e.g. `Casual`). |
-| `audio` | no | Voice note: MP3, WAV or M4A, at most 25 MiB. |
+| `image` | yes | HTTPS URL returning JPEG, PNG or WebP, at most 5 MiB. |
+| `audio` | no | HTTPS URL returning MP3, WAV or M4A, at most 25 MiB; omit or use `null` when unavailable. |
+| `outfitName` | yes | Non-blank text, at most 100 characters. |
+| `occasion` | yes | Event or situation (e.g. Party or Job Interview); non-blank, at most 100 characters. |
+| `category` | yes | Outfit classification (e.g. Western or Formal); non-blank, at most 100 characters. |
 
-Unknown fields are rejected with `400`. The default port is `5001` (macOS uses
-5000 for AirPlay). Browser clients are allowed only from the origins listed in
-`CORS_ALLOWED_ORIGINS` (comma-separated, for example `http://localhost:3000`).
+The backend fetches media over HTTPS, verifies actual file signatures, and
+uploads the bytes to the existing Firebase Storage bucket. URLs must resolve
+only to public IPv4 addresses; redirects, private addresses and non-HTTPS URLs
+are rejected. The source server must be reachable by Cloud Run without
+interactive browser authentication. Unknown fields and invalid media return
+`400`; unreachable URLs return `502`. Authentication is required.
+The request waits for analysis to finish and returns `201` with exactly:
 
-```sh
-curl -X POST http://localhost:5001/analyze \
-  -H "Authorization: Bearer <FIREBASE_ID_TOKEN>" \
-  -F "image=@outfit.jpg;type=image/jpeg" \
-  -F "outfitName=Summer Casual" -F "occasion=Party" -F "category=Casual"
+```json
+{ "status": "success", "outfitId": "generated-uuid" }
 ```
 
-For compatibility with older frontends, the one-step response also contains
-`outfit.analysis` with `summary`, `strengths`, `suggestions` (an array containing
-`next_direction`), and `colorPalette` (the `primary_colors` array). This field
-is a response-only alias; the Firestore details record is unchanged. The full
-analysis remains available in the top-level `analysis` and `scores` objects.
-The older frontend uses the one-step flow; it does not create drafts.
+For example:
+
+```json
+{
+  "image": "https://your-public-host.example/outfit.jpg",
+  "audio": "https://your-public-host.example/voice-note.m4a",
+  "outfitName": "Black Evening Dress",
+  "occasion": "Party",
+  "category": "Western"
+}
+```
+
+`audio` may instead be omitted or set to `null`. Occasion and category are
+passed to Gemini as context. Request JSON is limited to 64 KiB.
+
+### Retrieve the analysis
+
+`GET /getOutfitAnalysis?userId=...&outfitId=...` (also under `/api`) returns the
+owner's linked `outfit`, `media`, `analysis`, and `scores` objects. The user ID
+must match the authenticated Firebase user. `outfit.analysis` maps
+`next_direction` to a one-item `suggestions` array and `primary_colors` to
+`colorPalette`.
+
+While analysis is in progress, GET returns `202` with
+`{"status":"pending","outfitId":"..."}`. If it failed, GET returns `200`
+with `{"status":"failed","outfitId":"..."}`. A missing or unowned outfit
+returns `404`; a user ID that does not match the token returns `403`.
+
+After signing in with Firebase in the frontend, use the signed-in user's
+`uid` and call `await auth.currentUser.getIdToken()` on the existing Firebase
+Auth instance. Copy the ID token into a private terminal session as
+`FIREBASE_ID_TOKEN`; do not share it or commit it. The backend's email/password
+`POST /api/auth/signin` also returns `idToken` and `user.uid`. ID tokens expire,
+so obtain a fresh one if necessary.
+
+```sh
+export BASE_URL="http://localhost:5001"
+# Obtain a Firebase ID token securely; do not commit or share it.
+curl -X POST "$BASE_URL/analyze" \
+  -H "Authorization: Bearer $FIREBASE_ID_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"image":"https://your-public-host.example/outfit.jpg","outfitName":"Summer Casual","occasion":"Party","category":"Casual"}'
+# Use the returned outfitId below.
+curl -G "$BASE_URL/getOutfitAnalysis" \
+  -H "Authorization: Bearer $FIREBASE_ID_TOKEN" \
+  --data-urlencode "userId=FIREBASE_UID" --data-urlencode "outfitId=OUTFIT_ID"
+```
+
+Replace the placeholder with the actual photo URL. Send JSON with media URLs
+and call GET for the full result. The default port is `5001`. If
+`CORS_ALLOWED_ORIGINS` is configured, only the listed browser origins are
+allowed; if unset the existing wildcard behavior remains.
 
 ### Firestore collections
 
 Each completed upload has one linked record in each collection:
 
 - `fitcheck_outfit_details`: `outfitId`, `userId`, `outfitName`, `occasion`,
-  `category`, `createdAt` (Timestamp), `status` (`uploaded`).
+  `category`, `createdAt` (Timestamp), `status` (`pending`, `uploaded`, or `failed`).
 - `fitcheck_outfit_media`: `mediaId`, `outfitId`, `type` (`photo`),
   `PhotoStoragePath`, `PhotoUrl`, `AudioStoragePath`, `AudioUrl` (empty when no
-  voice note), `uploadedAt`. For a pending draft, the paths and URLs are empty
-  and `uploadedAt` is null. Draft media uses `outfitId` as its `mediaId`.
-  Files are stored under `outfits/<outfitId>/photos/` and
+  voice note), `uploadedAt`. Files are stored under `outfits/<outfitId>/photos/` and
   `outfits/<outfitId>/audio/`.
 - `fitcheck_outfit_analysis`: `analysis_id`, `outfit_id`, `user_id`, `image_url`,
   `style_category`, `outfit_title`, `overall_score` (0-100), `summary`,
@@ -138,7 +152,7 @@ Each completed upload has one linked record in each collection:
   `color_harmony_score`, `style_matching_score`, `balance_layering_score`,
   `accessories_score` (each 0-100), `created_at`.
 
-Successful requests return `201` with the four records:
+Successful GET requests return the four records:
 
 ```json
 {
@@ -153,17 +167,94 @@ Successful requests return `201` with the four records:
 authenticated retrieval or signed-URL flow must enforce ownership. Voice notes
 are stored but not analyzed.
 
-Invalid uploads return `400`, unsupported or mismatched file types `415`, and
-oversized files `413`. Unexpected failures return `500`; details are logged on
-the server, not returned to the client.
+Unexpected failures return `500`; details are logged on the server, not
+returned to the client. The server uploads files and creates the pending
+outfit and media records, then runs Gemini and atomically saves the analysis,
+scores, and `uploaded` status. AI failures mark the outfit `failed` when
+possible. A process crash can leave `pending` records; no background recovery
+is currently implemented.
 
-For one-step uploads, the server analyzes first, then uploads files and writes
-the four Firestore records in a single batch. For drafts, details and empty media
-are saved before upload; successful completion updates them and adds analysis
-and scores in a transaction. Upload failures attempt to clean up their files.
-If a draft transaction's outcome is uncertain, files are retained to avoid
-deleting a potentially committed image; operators must reconcile them.
-Firestore and Cloud Storage have no cross-service transaction, so a crash or
-failed cleanup can leave orphaned files. One-step retries can create duplicates.
+Firestore and Cloud Storage have no cross-service transaction. On a failed
+upload, confirmed earlier uploads are cleaned up, but an object with an
+uncertain upload outcome is retained for reconciliation. Files are also
+retained if the Firestore creation commit has an uncertain outcome. A failed
+request does not return the outfit ID, so operators may need to reconcile
+pending or failed records and orphaned files using server logs. Retrying creates
+a new outfit.
 
 Run the local backend tests with `npm test` from `Fitcheck/`.
+
+## Cloud Run deployment
+
+Do not run these commands until the project owner approves cloud changes.
+From `Fitcheck/`, the source deployment uses Google Cloud buildpacks and the
+existing `npm start`; the server binds to `0.0.0.0` and uses `PORT`. The
+`.gcloudignore` excludes local environment files, credentials, and dependencies.
+
+Enable the relevant services (requires permission to enable APIs):
+
+```sh
+gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com firestore.googleapis.com \
+  identitytoolkit.googleapis.com storage.googleapis.com \
+  secretmanager.googleapis.com \
+  --project fitcheck-685be
+```
+
+The existing Gemini integration uses the Gemini Developer API with an API key,
+not Vertex AI. Enable the API in the project associated with the Gemini API
+key, substituting its project ID (which may differ from the backend project):
+
+```sh
+gcloud services enable generativelanguage.googleapis.com \
+  --project YOUR_GEMINI_KEY_PROJECT_ID
+```
+
+Ensure the chosen model is available to that key. Do not enable Vertex AI
+mode. Before deploying, configure
+the existing Cloud Run service with `GOOGLE_CLOUD_PROJECT`,
+`FIREBASE_STORAGE_BUCKET`, `GEMINI_MODEL`, and the frontend's exact
+`CORS_ALLOWED_ORIGINS`. Provide `GEMINI_API_KEY` from Secret Manager;
+`FIREBASE_WEB_API_KEY` is also required for email/password sign-in. These
+settings must exist on the service **before** the exact deployment command
+below; the command does not create or set them. Never put secrets in source or
+command-line arguments. The first deployment requires a separate configuration
+step, or a pre-existing service with these settings.
+
+For the existing service, set the exact frontend origin after replacing the
+placeholder (this updates the existing service and creates a revision):
+
+```sh
+gcloud run services update fitcheck-api --project fitcheck-685be \
+  --region us-central1 --update-env-vars 'CORS_ALLOWED_ORIGINS=https://YOUR-FRONTEND-ORIGIN'
+```
+
+In the Cloud Run console, configure the other variables and secret references
+if missing. Secret Manager recommends pinning a specific secret version for
+environment variables rather than `latest`.
+
+The specified runtime service account needs Firestore read/write access
+(`roles/datastore.user`), Storage object read/create/delete on the specific
+bucket (`roles/storage.objectUser`), Firebase Auth user read for revoked-token
+checks (and create/delete if signup is used), and `roles/secretmanager.secretAccessor`
+on the relevant secrets. Gemini Developer API access uses its API key. Verify
+effective permissions and Secret Manager bindings before deployment; this
+repository does not grant IAM permissions.
+
+```sh
+cd Fitcheck
+gcloud config set project fitcheck-685be
+gcloud run deploy fitcheck-api \
+  --source . \
+  --region us-central1 \
+  --service-account fitcheck-api@fitcheck-685be.iam.gserviceaccount.com \
+  --allow-unauthenticated
+```
+
+Cloud Run is publicly invokable, but the outfit APIs still require Firebase
+authentication. Inspect logs with:
+
+```sh
+gcloud run services logs read fitcheck-api --project fitcheck-685be \
+  --region us-central1 --limit 50
+```

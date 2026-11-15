@@ -1,0 +1,11 @@
+.gcloudignore
+.git
+.gitignore
+node_modules/
+.env
+.env.*
+!.env.example
+.en
+*.service-account.json
+config/serviceAccountKey.json
+Fitcheck/
