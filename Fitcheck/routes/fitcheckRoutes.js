@@ -1,8 +1,15 @@
 const express = require("express");
-const { sendMessageController } = require("../controllers/messageController");
+const { createAnalyzeController } = require("../controllers/analyzeController");
 
-const router = express.Router();
+function createFitcheckRouter(dependencies) {
+  const router = express.Router();
+  const { sendMessageController } = require("../controllers/messageController");
+  const { analyzeOutfit } = createAnalyzeController(dependencies);
 
-router.post("/sendMessage", sendMessageController);
+  router.post("/analyze", analyzeOutfit);
 
-module.exports = router;
+  router.post("/sendMessage", express.json(), sendMessageController);
+  return router;
+}
+
+module.exports = { createFitcheckRouter };

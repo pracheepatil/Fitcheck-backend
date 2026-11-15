@@ -83,14 +83,15 @@ async function setup(t, analyze = async () => analysis) {
   const server = createApp({ auth, analyze, store: createOutfitStore(db, bucket) }).listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
-  return { db, bucket, url: `http://127.0.0.1:${server.address().port}` };
+  return { db, bucket, url: `http://127.0.0.1:${server.address().port}/api` };
 }
 
-async function createDraft(url, token = "alice") {
-  return fetch(`${url}/outfits`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ outfitName: "Weekend", occasion: "Party", category: "Casual" }),
+async function createDraftDirectly(db, bucket, userId = "alice") {
+  return createOutfitStore(db, bucket).createDraft({
+    userId,
+    outfitName: "Weekend",
+    occasion: "Party",
+    category: "Casual",
   });
 }
 
@@ -103,9 +104,7 @@ async function upload(url, token, fields = {}) {
 
 test("creates pending details and empty media before the upload, then completes the same outfit", async (t) => {
   const { db, bucket, url } = await setup(t);
-  const draftResponse = await createDraft(url);
-  assert.equal(draftResponse.status, 201);
-  const { outfit, media } = await draftResponse.json();
+  const { outfit, media } = await createDraftDirectly(db, bucket);
   assert.equal(outfit.status, "pending");
   assert.equal(outfit.userId, "alice");
   assert.equal(media.outfitId, outfit.outfitId);
@@ -133,8 +132,8 @@ test("creates pending details and empty media before the upload, then completes 
 
 test("does not analyze another user's draft or an already completed draft", async (t) => {
   let calls = 0;
-  const { url } = await setup(t, async () => { calls++; return analysis; });
-  const draft = await (await createDraft(url)).json();
+  const { db, bucket, url } = await setup(t, async () => { calls++; return analysis; });
+  const draft = await createDraftDirectly(db, bucket);
   assert.equal((await upload(url, "bob", { outfitId: draft.outfit.outfitId })).status, 404);
   assert.equal(calls, 0);
   assert.equal((await upload(url, "alice", { outfitId: draft.outfit.outfitId })).status, 201);
@@ -144,7 +143,7 @@ test("does not analyze another user's draft or an already completed draft", asyn
 
 test("keeps a draft unchanged when analysis fails", async (t) => {
   const { db, bucket, url } = await setup(t, async () => { throw new Error("Analysis unavailable"); });
-  const draft = await (await createDraft(url)).json();
+  const draft = await createDraftDirectly(db, bucket);
   assert.equal((await upload(url, "alice", { outfitId: draft.outfit.outfitId })).status, 500);
   assert.equal(db.records.get(`fitcheck_outfit_details/${draft.outfit.outfitId}`).status, "pending");
   assert.equal(db.records.get(`fitcheck_outfit_media/${draft.outfit.outfitId}`).PhotoStoragePath, "");
@@ -160,7 +159,7 @@ test("allows only one concurrent completion and cleans up the losing upload", as
     await ready;
     return analysis;
   });
-  const draft = await (await createDraft(url)).json();
+  const draft = await createDraftDirectly(db, bucket);
   const responses = await Promise.all([
     upload(url, "alice", { outfitId: draft.outfit.outfitId }),
     upload(url, "alice", { outfitId: draft.outfit.outfitId }),
@@ -202,7 +201,7 @@ test("retains files when the draft transaction outcome is uncertain", async () =
   assert.equal(bucket.files.size, 1);
 });
 
-test("preserves one-step uploads and rejects invalid draft requests", async (t) => {
+test("preserves one-step uploads and removes the draft creation endpoint", async (t) => {
   const { db, url } = await setup(t);
   const response = await upload(url, "alice", { outfitName: "Old flow", occasion: "Party", category: "Casual" });
   assert.equal(response.status, 201);
@@ -216,15 +215,10 @@ test("preserves one-step uploads and rejects invalid draft requests", async (t) 
   assert.equal(result.analysis.next_direction, analysis.next_direction);
   assert.equal(db.records.get(`fitcheck_outfit_details/${result.outfit.outfitId}`).analysis, undefined);
   assert.equal((await upload(url, "alice", { outfitId: "not-an-id" })).status, 400);
-  assert.equal((await fetch(`${url}/outfits`, {
-    method: "POST", headers: { Authorization: "Bearer alice", "Content-Type": "application/json" }, body: "{",
-  })).status, 400);
-  assert.equal((await fetch(`${url}/outfits`, {
-    method: "POST", headers: { Authorization: "Bearer alice", "Content-Type": "application/json" },
-    body: JSON.stringify({ userId: "bob" }),
-  })).status, 400);
-  assert.equal((await upload(url, "alice", { outfitId: "123e4567-e89b-42d3-a456-426614174000", category: "Casual" })).status, 400);
-  assert.equal((await fetch(`${url}/outfits`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
-  })).status, 401);
+  const removedEndpoint = await fetch(`${url}/outfits`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ outfitName: "Weekend" }),
+  });
+  assert.equal(removedEndpoint.status, 404);
 });

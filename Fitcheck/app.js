@@ -1,5 +1,5 @@
 const express = require("express");
-const { createAnalyzeRouter } = require("./routes/analyze");
+const { createFitcheckRouter } = require("./routes/fitcheckRoutes");
 
 function createApp(dependencies, { apiRoutes = [] } = {}) {
   const app = express();
@@ -12,7 +12,7 @@ function createApp(dependencies, { apiRoutes = [] } = {}) {
     }
     return next();
   });
-  app.use(createAnalyzeRouter(dependencies));
+  app.use("/api", createFitcheckRouter(dependencies));
   app.use("/api", express.json());
   for (const [path, router] of apiRoutes) app.use(path, router);
   app.get("/api/health", (req, res) => {
@@ -33,7 +33,6 @@ if (require.main === module) {
     const apiRoutes = [
       ["/api/auth", require("./routes/authRoutes")],
       ["/api", require("./routes/firebaseTestRoutes")],
-      ["/api", require("./routes/fitcheckRoutes")],
     ];
     const app = createApp(dependencies, { apiRoutes });
     const port = process.env.PORT || 5001;
