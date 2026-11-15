@@ -1,14 +1,10 @@
 const express = require("express");
 const { createAnalyzeRouter } = require("./routes/analyze");
 
-function createApp(dependencies, { allowedOrigins = [], apiRoutes = [] } = {}) {
+function createApp(dependencies, { apiRoutes = [] } = {}) {
   const app = express();
   app.use((req, res, next) => {
-    const origin = req.get("origin");
-    if (!origin) return next();
-    res.vary("Origin");
-    if (!allowedOrigins.includes(origin)) return res.status(403).json({ error: "Origin not allowed" });
-    res.set("Access-Control-Allow-Origin", origin);
+    res.set("Access-Control-Allow-Origin", "*");
     if (req.method === "OPTIONS") {
       res.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
       res.set("Access-Control-Allow-Headers", "Authorization, Content-Type");
@@ -33,14 +29,13 @@ if (require.main === module) {
   try {
     require("dotenv/config");
     const { createDependencies } = require("./services/config");
-    const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || "").split(",").map((origin) => origin.trim()).filter(Boolean);
     const dependencies = createDependencies(process.env);
     const apiRoutes = [
       ["/api/auth", require("./routes/authRoutes")],
       ["/api", require("./routes/firebaseTestRoutes")],
       ["/api", require("./routes/fitcheckRoutes")],
     ];
-    const app = createApp(dependencies, { allowedOrigins, apiRoutes });
+    const app = createApp(dependencies, { apiRoutes });
     const port = process.env.PORT || 5001;
     app.listen(port, () => console.log(`Server running on port ${port}`));
   } catch (error) {

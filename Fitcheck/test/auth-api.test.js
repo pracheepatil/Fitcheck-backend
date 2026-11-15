@@ -55,7 +55,7 @@ test("merged authentication and analyzer routes are mounted together", async (t)
     auth: { verifyIdToken: async () => ({ uid: "test-user" }) },
     analyze: async () => ({}),
     store: {},
-  }, { apiRoutes, allowedOrigins: ["http://localhost:3000"] }).listen(0, "127.0.0.1");
+  }, { apiRoutes }).listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const url = `http://127.0.0.1:${server.address().port}`;
@@ -80,5 +80,11 @@ test("merged authentication and analyzer routes are mounted together", async (t)
     method: "OPTIONS", headers: { Origin: "http://localhost:3000", "Access-Control-Request-Method": "POST" },
   });
   assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "*");
   assert.match(preflight.headers.get("access-control-allow-methods"), /GET/);
+  const arbitraryOrigin = await fetch(`${url}/api/health`, {
+    headers: { Origin: "https://arbitrary.example" },
+  });
+  assert.equal(arbitraryOrigin.status, 200);
+  assert.equal(arbitraryOrigin.headers.get("access-control-allow-origin"), "*");
 });
