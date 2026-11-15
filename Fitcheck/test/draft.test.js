@@ -71,7 +71,11 @@ function fakeBucket() {
   };
 }
 
-async function setup(t, analyze = async () => analysis) {
+async function setup(
+  t,
+  analyze = async () => analysis,
+  fetchImage = async () => ({ buffer: png, mimeType: "image/png" })
+) {
   const db = fakeFirestore();
   const bucket = fakeBucket();
   const auth = {
@@ -80,7 +84,12 @@ async function setup(t, analyze = async () => analysis) {
       return { uid: token };
     },
   };
-  const server = createApp({ auth, analyze, store: createOutfitStore(db, bucket) }).listen(0, "127.0.0.1");
+  const server = createApp({
+    auth,
+    analyze,
+    fetchImage,
+    store: createOutfitStore(db, bucket),
+  }).listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
   return { db, bucket, url: `http://127.0.0.1:${server.address().port}/api` };
@@ -96,77 +105,117 @@ async function createDraftDirectly(db, bucket, userId = "alice") {
 }
 
 async function upload(url, token, fields = {}) {
-  const body = new FormData();
-  body.append("image", new Blob([png], { type: "image/png" }), "outfit.png");
-  for (const [key, value] of Object.entries(fields)) body.append(key, value);
-  return fetch(`${url}/analyze`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body });
+  return fetch(`${url}/analyze`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      image: "https://example.com/outfit.jpg",
+      audio: "",
+      outfitName: "Weekend look",
+      occasion: "wedding",
+      category: "Casual",
+      ...fields,
+    }),
+  });
 }
 
-test("creates pending details and empty media before the upload, then completes the same outfit", async (t) => {
-  const { db, bucket, url } = await setup(t);
-  const { outfit, media } = await createDraftDirectly(db, bucket);
-  assert.equal(outfit.status, "pending");
-  assert.equal(outfit.userId, "alice");
-  assert.equal(media.outfitId, outfit.outfitId);
-  assert.equal(media.PhotoStoragePath, "");
-  assert.equal(media.PhotoUrl, "");
-  assert.equal(media.AudioStoragePath, "");
-  assert.equal(media.AudioUrl, "");
-  assert.equal(media.uploadedAt, null);
-  assert.equal(bucket.files.size, 0);
-  assert.equal(db.records.size, 2);
-
-  const response = await upload(url, "alice", { outfitId: outfit.outfitId });
-  assert.equal(response.status, 201);
-  const saved = await response.json();
-  assert.equal(saved.outfit.outfitId, outfit.outfitId);
-  assert.equal(saved.outfit.outfitName, "Weekend");
-  assert.equal(saved.outfit.status, "uploaded");
-  assert.equal(saved.outfit.analysis, undefined);
-  assert.equal(saved.media.mediaId, media.mediaId);
-  assert.equal(saved.analysis.outfit_id, outfit.outfitId);
-  assert.equal(saved.scores.analysis_id, saved.analysis.analysis_id);
-  assert.ok(bucket.files.has(saved.media.PhotoStoragePath));
-  assert.equal(db.records.size, 4);
-});
-
-test("does not analyze another user's draft or an already completed draft", async (t) => {
-  let calls = 0;
-  const { db, bucket, url } = await setup(t, async () => { calls++; return analysis; });
-  const draft = await createDraftDirectly(db, bucket);
-  assert.equal((await upload(url, "bob", { outfitId: draft.outfit.outfitId })).status, 404);
-  assert.equal(calls, 0);
-  assert.equal((await upload(url, "alice", { outfitId: draft.outfit.outfitId })).status, 201);
-  assert.equal((await upload(url, "alice", { outfitId: draft.outfit.outfitId })).status, 409);
-  assert.equal(calls, 1);
-});
-
-test("keeps a draft unchanged when analysis fails", async (t) => {
-  const { db, bucket, url } = await setup(t, async () => { throw new Error("Analysis unavailable"); });
-  const draft = await createDraftDirectly(db, bucket);
-  assert.equal((await upload(url, "alice", { outfitId: draft.outfit.outfitId })).status, 500);
-  assert.equal(db.records.get(`fitcheck_outfit_details/${draft.outfit.outfitId}`).status, "pending");
-  assert.equal(db.records.get(`fitcheck_outfit_media/${draft.outfit.outfitId}`).PhotoStoragePath, "");
-  assert.equal(bucket.files.size, 0);
-});
-
-test("allows only one concurrent completion and cleans up the losing upload", async (t) => {
-  let arrived = 0;
-  let release;
-  const ready = new Promise((resolve) => { release = resolve; });
-  const { db, bucket, url } = await setup(t, async () => {
-    if (++arrived === 2) release();
-    await ready;
-    return analysis;
+test("analyzes the JSON image URL and stores analysis with the original media URLs", async (t) => {
+  const imageUrl = "https://example.com/outfit.jpg";
+  const audioUrl = "https://example.com/voice-note.mp3";
+  let analyzedImage;
+  const { db, bucket, url } = await setup(
+    t,
+    async (input) => {
+      analyzedImage = input;
+      return analysis;
+    },
+    async (inputUrl) => {
+      assert.equal(inputUrl, imageUrl);
+      return { buffer: png, mimeType: "image/png" };
+    }
+  );
+  const response = await upload(url, "alice", {
+    image: imageUrl,
+    audio: audioUrl,
+    outfitName: "Weekend look",
+    occasion: "wedding",
+    category: "Casual",
   });
-  const draft = await createDraftDirectly(db, bucket);
-  const responses = await Promise.all([
-    upload(url, "alice", { outfitId: draft.outfit.outfitId }),
-    upload(url, "alice", { outfitId: draft.outfit.outfitId }),
-  ]);
-  assert.deepEqual(responses.map((response) => response.status).sort(), [201, 409]);
+
+  assert.equal(response.status, 201);
+  const result = await response.json();
+  const { outfit, media } = result;
+  assert.equal(outfit.userId, "alice");
+  assert.equal(outfit.outfitName, "Weekend look");
+  assert.equal(outfit.occasion, "wedding");
+  assert.equal(outfit.category, "Casual");
+  assert.equal(media.PhotoUrl, imageUrl);
+  assert.equal(media.AudioUrl, audioUrl);
+  assert.equal(media.PhotoStoragePath, "");
+  assert.equal(media.AudioStoragePath, "");
+  assert.equal(result.analysis.image_url, imageUrl);
+  assert.equal(result.analysis.summary, analysis.summary);
+  assert.equal(result.scores.color_harmony_score, analysis.scores.color_harmony_score);
+  assert.equal(analyzedImage.mimeType, "image/png");
+  assert.deepEqual(analyzedImage.image, png);
+  assert.equal(bucket.files.size, 0);
   assert.equal(db.records.size, 4);
-  assert.equal(bucket.files.size, 1);
+  assert.equal(
+    [...db.records.keys()].filter((path) => path.startsWith("fitcheck_outfit_analysis/")).length,
+    1
+  );
+  assert.equal(
+    [...db.records.keys()].filter((path) => path.startsWith("fitcheck_outfit_analysis_scores/")).length,
+    1
+  );
+
+  const minimalResponse = await upload(url, "alice");
+  assert.equal(minimalResponse.status, 201);
+  const minimalResult = await minimalResponse.json();
+  assert.equal(minimalResult.media.AudioUrl, "");
+});
+
+test("requires JSON input and Firebase authentication", async (t) => {
+  const { url } = await setup(t);
+  for (const field of ["image", "outfitName", "occasion", "category"]) {
+    const body = {
+      image: "https://example.com/outfit.jpg",
+      outfitName: "Weekend look",
+      occasion: "wedding",
+      category: "Casual",
+    };
+    delete body[field];
+    const response = await fetch(`${url}/analyze`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer alice",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    assert.equal(response.status, 400);
+  }
+  assert.equal((await upload(url, "alice", { image: "" })).status, 400);
+
+  const multipart = await fetch(`${url}/analyze`, {
+    method: "POST",
+    headers: {
+      Authorization: "Bearer alice",
+      "Content-Type": "multipart/form-data",
+    },
+    body: "",
+  });
+  assert.equal(multipart.status, 415);
+
+  const unauthenticated = await fetch(`${url}/analyze`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image: "https://example.com/outfit.jpg" }),
+  });
+  assert.equal(unauthenticated.status, 401);
 });
 
 test("keeps the draft and removes its file when storage fails", async () => {
@@ -201,24 +250,14 @@ test("retains files when the draft transaction outcome is uncertain", async () =
   assert.equal(bucket.files.size, 1);
 });
 
-test("preserves one-step uploads and removes the draft creation endpoint", async (t) => {
+test("rejects unknown analyze fields and keeps the draft endpoint removed", async (t) => {
   const { db, url } = await setup(t);
-  const response = await upload(url, "alice", { outfitName: "Old flow", occasion: "Party", category: "Casual" });
-  assert.equal(response.status, 201);
-  const result = await response.json();
-  assert.deepEqual(result.outfit.analysis, {
-    summary: analysis.summary,
-    strengths: analysis.strengths,
-    suggestions: [analysis.next_direction],
-    colorPalette: analysis.primary_colors,
-  });
-  assert.equal(result.analysis.next_direction, analysis.next_direction);
-  assert.equal(db.records.get(`fitcheck_outfit_details/${result.outfit.outfitId}`).analysis, undefined);
-  assert.equal((await upload(url, "alice", { outfitId: "not-an-id" })).status, 400);
+  assert.equal((await upload(url, "alice", { unexpected: "value" })).status, 400);
   const removedEndpoint = await fetch(`${url}/outfits`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ outfitName: "Weekend" }),
   });
   assert.equal(removedEndpoint.status, 404);
+  assert.equal(db.records.size, 0);
 });

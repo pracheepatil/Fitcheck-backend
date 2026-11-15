@@ -12,6 +12,7 @@ function createApp(dependencies, { apiRoutes = [] } = {}) {
     }
     return next();
   });
+  app.use("/api/analyze", express.json({ limit: "8kb" }));
   app.use("/api", createFitcheckRouter(dependencies));
   app.use("/api", express.json());
   for (const [path, router] of apiRoutes) app.use(path, router);

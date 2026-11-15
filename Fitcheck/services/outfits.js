@@ -27,6 +27,71 @@ function createOutfitStore(db, bucket) {
   }
 
   return {
+    async saveReferences({
+      userId,
+      imageUrl,
+      audioUrl,
+      analysis,
+      outfitName,
+      occasion,
+      category,
+    }) {
+      const outfitId = randomUUID();
+      const mediaId = randomUUID();
+      const analysisId = randomUUID();
+      const scoreId = randomUUID();
+      const now = new Date();
+      const outfit = {
+        outfitId,
+        userId,
+        createdAt: now,
+        status: "uploaded",
+        outfitName,
+        occasion,
+        category,
+      };
+      const media = {
+        mediaId,
+        outfitId,
+        type: "photo",
+        uploadedAt: now,
+        PhotoStoragePath: "",
+        PhotoUrl: imageUrl,
+        AudioStoragePath: "",
+        AudioUrl: audioUrl,
+      };
+      const { scores, ...feedback } = analysis;
+      const analysisRecord = {
+        analysis_id: analysisId,
+        outfit_id: outfitId,
+        user_id: userId,
+        image_url: imageUrl,
+        style_category: feedback.style_category,
+        outfit_title: feedback.outfit_title,
+        overall_score: feedback.overall_score,
+        summary: feedback.summary,
+        color_description: feedback.color_description,
+        primary_colors: feedback.primary_colors,
+        strengths: feedback.strengths,
+        next_direction: feedback.next_direction,
+        created_at: now,
+      };
+      const scoresRecord = {
+        score_id: scoreId,
+        analysis_id: analysisId,
+        ...scores,
+        created_at: now,
+      };
+
+      const batch = db.batch();
+      batch.set(db.collection(COLLECTIONS.details).doc(outfitId), outfit);
+      batch.set(db.collection(COLLECTIONS.media).doc(mediaId), media);
+      batch.set(db.collection(COLLECTIONS.analysis).doc(analysisId), analysisRecord);
+      batch.set(db.collection(COLLECTIONS.scores).doc(scoreId), scoresRecord);
+      await batch.commit();
+      return { outfit, media, analysis: analysisRecord, scores: scoresRecord };
+    },
+
     async createDraft({ userId, outfitName, occasion, category }) {
       const outfitId = randomUUID();
       const now = new Date();
