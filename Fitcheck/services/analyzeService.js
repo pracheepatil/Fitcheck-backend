@@ -1,4 +1,4 @@
-const { lookup } = require("node:dns/promises");
+const { resolve4 } = require("node:dns/promises");
 const https = require("node:https");
 const net = require("node:net");
 
@@ -43,21 +43,21 @@ function isPublicIPv4(address) {
   );
 }
 
-async function resolvePublicIPv4(hostname) {
+async function resolvePublicIPv4(hostname, resolveIPv4 = resolve4) {
   if (net.isIP(hostname)) {
     if (net.isIP(hostname) !== 4 || !isPublicIPv4(hostname)) throw new InvalidMediaError("Media URL must use a public HTTPS host");
     return hostname;
   }
   let addresses;
   try {
-    addresses = await lookup(hostname, { all: true, verbatim: true });
+    addresses = await resolveIPv4(hostname);
   } catch {
     throw new MediaFetchError("Unable to resolve media URL");
   }
-  if (!addresses.length || addresses.some(({ family, address }) => family !== 4 || !isPublicIPv4(address))) {
+  if (!addresses.length || addresses.some((address) => !isPublicIPv4(address))) {
     throw new InvalidMediaError("Media URL must resolve only to public IPv4 addresses");
   }
-  return addresses[0].address;
+  return addresses[0];
 }
 
 async function validateMediaContent(buffer, label, maxBytes, allowedTypes, contentType) {

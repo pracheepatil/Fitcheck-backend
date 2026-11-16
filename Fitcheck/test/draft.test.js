@@ -246,6 +246,15 @@ test("validates HTTPS URL shape and downloaded media signatures and size", async
   }
   await assert.rejects(resolvePublicIPv4("127.0.0.1"), InvalidMediaError);
   await assert.rejects(resolvePublicIPv4("localhost"), InvalidMediaError);
+  assert.equal(
+    await resolvePublicIPv4("firebasestorage.googleapis.com", async () => ["172.217.115.4"]),
+    "172.217.115.4",
+    "public IPv4 results should be accepted even when the hostname also has AAAA records"
+  );
+  await assert.rejects(
+    resolvePublicIPv4("image.example.com", async () => ["172.217.115.4", "127.0.0.1"]),
+    InvalidMediaError
+  );
   assert.equal(validateMediaUrl(imageUrl, "Image").hostname, "images.example.com");
   assert.equal((await validateMediaContent(jpeg, "Image", MAX_IMAGE_BYTES, new Set(["image/jpeg"]), "image/jpeg")).mimeType, "image/jpeg");
   assert.equal((await validateMediaContent(png, "Image", MAX_IMAGE_BYTES, new Set(["image/png"]), "application/octet-stream")).mimeType, "image/png");
