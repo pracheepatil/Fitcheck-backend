@@ -3,9 +3,12 @@ const assert = require("node:assert/strict");
 const { createApp } = require("../app");
 const { createOutfitStore } = require("../services/outfits");
 const { createAnalyzer } = require("../services/gemini");
+const https = require("node:https");
+const { EventEmitter } = require("node:events");
+const { Readable } = require("node:stream");
 const {
   InvalidMediaError, MAX_IMAGE_BYTES, MAX_AUDIO_BYTES, validateMediaUrl, validateMediaContent,
-  resolvePublicIPv4,
+  resolvePublicIPv4, downloadMedia,
 } = require("../services/analyzeService");
 const { BaseLlm } = require("@google/adk");
 
@@ -15,6 +18,7 @@ const webp = Buffer.from("5249464616000000574542505650384c090000002f000000000710
 const mp3 = Buffer.from("49443304000000000000fffb9000", "hex");
 const m4a = Buffer.from("00000018667479704d344120000000004d34412069736f6d", "hex");
 const wav = Buffer.from("524946462400000057415645666d74201000000001000100401f0000803e0000020010006461746100000000", "hex");
+const webm = Buffer.from("1a45dfa38b4282847765626d42878101", "hex");
 const imageUrl = "https://images.example.com/outfit.png";
 const audioUrl = "https://audio.example.com/voice.wav";
 const analysis = {
@@ -95,6 +99,14 @@ function fakeBucket() {
         files.set(name, data);
       },
       delete: async () => { files.delete(name); },
+      getMetadata: async () => {
+        if (!files.has(name)) throw Object.assign(new Error("not found"), { code: 404 });
+        return [{ size: files.get(name).length, generation: "1" }];
+      },
+      download: async () => {
+        if (!files.has(name)) throw Object.assign(new Error("not found"), { code: 404 });
+        return [files.get(name)];
+      },
     }),
   };
 }
@@ -150,9 +162,12 @@ test("saves each submission and retrieves its linked analysis with a minimal res
   assert.match(result.outfitId, /^[0-9a-f-]{36}$/);
   assert.equal(context.occasion, "Date Night");
   assert.equal(context.category, "Formal");
+  assert.equal(context.outfitName, "Weekend");
   assert.deepEqual(context.image, png);
+  assert.deepEqual(context.audio, { buffer: mp3, mimeType: "audio/mpeg" });
   const second = await post(url, payload({ audio: null }));
   assert.equal(second.status, 201);
+  assert.equal(context.audio, undefined);
   const other = await second.json();
   assert.notEqual(result.outfitId, other.outfitId);
   assert.equal(db.records.size, 8);
@@ -175,9 +190,53 @@ test("saves each submission and retrieves its linked analysis with a minimal res
   assert.equal(saved.scores.analysis_id, saved.analysis.analysis_id);
   assert.deepEqual(bucket.files.get(saved.media.PhotoStoragePath), png);
   assert.deepEqual(bucket.files.get(saved.media.AudioStoragePath), mp3);
+  assert.equal(saved.media.PhotoUrl, `/api/outfits/${result.outfitId}/photo`);
+  const photoUrl = `${url.replace(/\/api$/, "")}${saved.media.PhotoUrl}`;
+  assert.equal((await fetch(photoUrl)).status, 401);
+  assert.equal((await fetch(photoUrl, { headers: { Authorization: "Bearer bob" } })).status, 404);
+  const photo = await fetch(photoUrl, { headers: { Authorization: "Bearer alice" } });
+  assert.equal(photo.status, 200);
+  assert.equal(photo.headers.get("content-type"), "image/png");
+  assert.equal(photo.headers.get("cache-control"), "private, no-store");
+  assert.deepEqual(Buffer.from(await photo.arrayBuffer()), png);
+  bucket.files.delete(saved.media.PhotoStoragePath);
+  assert.equal((await fetch(photoUrl, { headers: { Authorization: "Bearer alice" } })).status, 404);
+  const mediaKey = `fitcheck_outfit_media/${saved.media.mediaId}`;
+  db.records.set(mediaKey, { ...db.records.get(mediaKey), PhotoStoragePath: "outfits/someone-else/photo.png" });
+  assert.equal((await fetch(photoUrl, { headers: { Authorization: "Bearer alice" } })).status, 404);
   assert.equal((await get(url, result.outfitId, "bob")).status, 404);
   assert.equal((await get(url, result.outfitId, "bob", "alice")).status, 403);
   assert.equal((await fetch(`${url}/getOutfitAnalysis?userId=alice&outfitId=${result.outfitId}`)).status, 401);
+});
+
+test("downloads and stores a WebM voice note sent with audio/webm", async (t) => {
+  const audioTypes = new Set(["audio/mpeg", "audio/wav", "audio/mp4", "audio/x-m4a", "audio/webm"]);
+  let accept;
+  t.mock.method(https, "get", (_url, options, callback) => {
+    accept = options.headers.Accept;
+    const request = new EventEmitter();
+    request.destroy = (error) => { if (error) request.emit("error", error); };
+    process.nextTick(() => {
+      const response = Readable.from([webm]);
+      response.statusCode = 200;
+      response.headers = { "content-type": "audio/webm; codecs=opus" };
+      callback(response);
+    });
+    return request;
+  });
+  const media = await downloadMedia("https://8.8.8.8/voice.webm", "Audio", MAX_AUDIO_BYTES, audioTypes);
+  assert.ok(accept.includes("audio/webm"));
+  const { db, bucket, url } = await setup(t, async () => analysis, async (_sourceUrl, label) =>
+    label === "Image" ? { buffer: png, contentType: "image/png" } : media);
+  const response = await post(url, payload({ audio: "https://8.8.8.8/voice.webm" }));
+  assert.equal(response.status, 201);
+  const { outfitId } = await response.json();
+  const saved = await (await get(url, outfitId)).json();
+  assert.ok(saved.media.AudioStoragePath.endsWith(".webm"));
+  assert.deepEqual(bucket.files.get(saved.media.AudioStoragePath), webm);
+  assert.equal(db.records.size, 4);
+  await assert.rejects(validateMediaContent(png, "Audio", MAX_AUDIO_BYTES, audioTypes, "audio/webm"), InvalidMediaError);
+  await assert.rejects(validateMediaContent(webm, "Audio", MAX_AUDIO_BYTES, audioTypes, "audio/mpeg"), InvalidMediaError);
 });
 
 test("rejects malformed, unauthorized, and legacy requests before persistence", async (t) => {
@@ -239,6 +298,21 @@ test("takes image and optional audio URLs from req.body and passes occasion/cate
   assert.deepEqual(bucket.files.get(saved.media.AudioStoragePath), m4a);
 });
 
+test("keeps analysis results associated with each submission's occasion and category", async (t) => {
+  const { url } = await setup(t, async ({ occasion, category }) => ({
+    ...analysis, summary: `${occasion} / ${category}`,
+  }));
+  const first = await (await post(url, payload({ occasion: "Party", category: "Casual" }))).json();
+  const second = await (await post(url, payload({ occasion: "Office", category: "Formal" }))).json();
+  assert.notEqual(first.outfitId, second.outfitId);
+  const firstResult = await (await get(url, first.outfitId)).json();
+  const secondResult = await (await get(url, second.outfitId)).json();
+  assert.equal(firstResult.outfit.occasion, "Party");
+  assert.equal(firstResult.analysis.summary, "Party / Casual");
+  assert.equal(secondResult.outfit.occasion, "Office");
+  assert.equal(secondResult.analysis.summary, "Office / Formal");
+});
+
 test("validates HTTPS URL shape and downloaded media signatures and size", async () => {
   for (const value of ["", "not a URL", "data:image/png;base64,AAAA", "http://example.com/image.png",
     "https://user:pass@example.com/image.png"]) {
@@ -284,23 +358,103 @@ test("rejects downloaded files with unsupported signatures or oversized content 
 });
 
 test("passes occasion and category to the Gemini model as context", async () => {
-  let request;
+  const requests = [];
   class FakeModel extends BaseLlm {
     async *generateContentAsync(input) {
-      request = input;
+      requests.push(input);
       yield { content: { role: "model", parts: [{ text: JSON.stringify(analysis) }] } };
     }
   }
   const analyze = createAnalyzer("fake", "unused", new FakeModel({ model: "fake" }));
   const result = await analyze({
-    image: png, mimeType: "image/png", userId: "alice", occasion: "Job Interview", category: "Formal",
+    image: png, mimeType: "image/png", userId: "alice", outfitName: "Blue blazer",
+    occasion: "Job Interview", category: "Formal", audio: { buffer: webm, mimeType: "audio/webm" },
   });
   assert.deepEqual(result, analysis);
-  const parts = request.contents.flatMap((content) => content.parts || []);
+  await analyze({
+    image: png, mimeType: "image/png", userId: "alice", outfitName: "Weekend look",
+    occasion: "Party", category: "Casual",
+  });
+  const parts = requests[0].contents.flatMap((content) => content.parts || []);
   const text = parts.find((part) => part.text?.includes("Outfit context:")).text;
+  assert.ok(text.includes('"outfitName":"Blue blazer"'));
   assert.ok(text.includes('"occasion":"Job Interview"'));
   assert.ok(text.includes('"category":"Formal"'));
   assert.equal(parts.find((part) => part.inlineData).inlineData.data, png.toString("base64"));
+  const audioPart = parts.find((part) => part.inlineData?.mimeType === "audio/webm");
+  assert.equal(audioPart.inlineData.data, webm.toString("base64"));
+  const secondText = requests[1].contents.flatMap((content) => content.parts || [])
+    .find((part) => part.text?.includes("Outfit context:")).text;
+  assert.ok(secondText.includes('"outfitName":"Weekend look"'));
+  assert.ok(secondText.includes('"occasion":"Party"'));
+  assert.ok(secondText.includes('"category":"Casual"'));
+  const secondParts = requests[1].contents.flatMap((content) => content.parts || []);
+  assert.equal(secondParts.filter((part) => part.inlineData).length, 1);
+  await analyze({
+    image: png, mimeType: "image/png", userId: "alice",
+    audio: { buffer: m4a, mimeType: "audio/mp4" },
+  });
+  const thirdParts = requests[2].contents.flatMap((content) => content.parts || []);
+  assert.deepEqual(thirdParts.find((part) => part.inlineData?.mimeType === "audio/m4a").inlineData, {
+    mimeType: "audio/m4a", data: m4a.toString("base64"),
+  });
+});
+
+test("uploads large audio to Gemini and removes the temporary file", async () => {
+  const requests = [];
+  const deleted = [];
+  let uploaded;
+  class FakeModel extends BaseLlm {
+    constructor() {
+      super({ model: "fake" });
+      this.apiClient = { files: {
+        upload: async (input) => {
+          uploaded = input;
+          return { name: "files/test", uri: "https://example.test/file", state: "ACTIVE" };
+        },
+        delete: async ({ name }) => deleted.push(name),
+      } };
+    }
+    async *generateContentAsync(input) {
+      requests.push(input);
+      yield { content: { role: "model", parts: [{ text: JSON.stringify(analysis) }] } };
+    }
+  }
+  const analyze = createAnalyzer("fake", "unused", new FakeModel());
+  const audio = { buffer: Buffer.alloc(14 * 1024 * 1024), mimeType: "audio/mp4" };
+  await analyze({ image: png, mimeType: "image/png", userId: "alice", audio });
+  assert.equal(uploaded.file.size, audio.buffer.length);
+  assert.equal(uploaded.config.mimeType, "audio/m4a");
+  const parts = requests[0].contents.flatMap((content) => content.parts || []);
+  assert.deepEqual(parts.find((part) => part.fileData).fileData, {
+    mimeType: "audio/m4a", fileUri: "https://example.test/file",
+  });
+  assert.deepEqual(deleted, ["files/test"]);
+});
+
+test("cleans up large audio and propagates upload processing or model failures", async () => {
+  const audio = { buffer: Buffer.alloc(14 * 1024 * 1024), mimeType: "audio/mpeg" };
+  for (const state of ["FAILED", "ACTIVE"]) {
+    const deleted = [];
+    class FakeModel extends BaseLlm {
+      constructor() {
+        super({ model: "fake" });
+        this.apiClient = { files: {
+          upload: async () => ({ name: "files/test", uri: "https://example.test/file", state }),
+          delete: async ({ name }) => deleted.push(name),
+        } };
+      }
+      async *generateContentAsync() {
+        throw new Error("model unavailable");
+      }
+    }
+    const analyze = createAnalyzer("fake", "unused", new FakeModel());
+    await assert.rejects(
+      analyze({ image: png, mimeType: "image/png", userId: "alice", audio }),
+      state === "FAILED" ? /did not become ready/ : /Gemini analysis failed/,
+    );
+    assert.deepEqual(deleted, ["files/test"]);
+  }
 });
 
 test("persists pending submission before analysis, then completes it", async (t) => {

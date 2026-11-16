@@ -15,6 +15,12 @@ function createAnalyzeResponse(outfitId) {
   return { status: "success", outfitId };
 }
 
+function validOutfitId(id) {
+  return typeof id === "string" && !!id.trim() && id === id.trim() &&
+    Buffer.byteLength(id, "utf8") <= 1500 && !id.includes("/") &&
+    !/^__.*__$/.test(id) && id !== "." && id !== "..";
+}
+
 function mapAnalyzeError(error, res, next) {
   if (error instanceof InvalidMediaError) {
     return res.status(400).json({ error: error.message });
@@ -69,10 +75,7 @@ function createAnalyzeController(dependencies) {
     const input = req.query;
     if (!input || typeof input.userId !== "string" || !input.userId.trim() ||
         input.userId !== input.userId.trim() ||
-        typeof input.outfitId !== "string" || !input.outfitId.trim() ||
-        input.outfitId !== input.outfitId.trim() || Buffer.byteLength(input.outfitId, "utf8") > 1500 ||
-        input.outfitId.includes("/") || /^__.*__$/.test(input.outfitId) ||
-        input.outfitId === "." || input.outfitId === ".." ||
+        !validOutfitId(input.outfitId) ||
         Object.keys(input).some((key) => !["userId", "outfitId"].includes(key))) {
       return res.status(400).json({ error: "Provide a valid userId and outfitId" });
     }
@@ -89,9 +92,21 @@ function createAnalyzeController(dependencies) {
     }
   }
 
+  async function getPhoto(req, res, next) {
+    if (!validOutfitId(req.params.outfitId)) return res.status(400).json({ error: "Provide a valid outfitId" });
+    try {
+      const photo = await dependencies.store.getPhoto({ outfitId: req.params.outfitId, userId: req.user.uid });
+      return res.set({ "Content-Type": photo.mimeType, "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" })
+        .send(photo.buffer);
+    } catch (error) {
+      return mapAnalyzeError(error, res, next);
+    }
+  }
+
   return {
     analyzeOutfit: [requireAuthentication(dependencies.auth), parseJson, analyzeOutfit],
     getAnalysis: [requireAuthentication(dependencies.auth), validateIdentity, getAnalysis],
+    getPhoto: [requireAuthentication(dependencies.auth), getPhoto],
   };
 }
 

@@ -20,8 +20,8 @@ Firestore. Saved analyses can be retrieved separately.
    `GOOGLE_APPLICATION_CREDENTIALS` to a service-account credential file kept
    outside the repository. Never commit credentials.
 4. Create a Gemini API key in Google AI Studio. The server sends the uploaded
-   image to the Gemini API for analysis; ensure this is appropriate for the
-   application's privacy policy.
+   image and optional voice note to the Gemini API for analysis; ensure this is
+   appropriate for the application's privacy policy.
 5. From `Fitcheck/`, install dependencies and configure the environment:
 
    ```sh
@@ -34,7 +34,7 @@ Firestore. Saved analyses can be retrieved separately.
 `GOOGLE_CLOUD_PROJECT`, `FIREBASE_STORAGE_BUCKET`, `GEMINI_API_KEY`, and
 `GEMINI_MODEL` are required. The bucket name is the bare name, not a `gs://`
 URL. Set `GEMINI_MODEL` to an available Gemini API model that supports image
-input and structured output. `GOOGLE_GENAI_USE_VERTEXAI` must not be enabled.
+and audio input and structured output. `GOOGLE_GENAI_USE_VERTEXAI` must not be enabled.
 The backend does not create the bucket, provision Firebase, or set security
 rules. The Node version requirement follows Google ADK's TypeScript quickstart.
 Email/password sign-in also requires `FIREBASE_WEB_API_KEY` from the same
@@ -64,7 +64,7 @@ files.
 | Field | Required | Notes |
 |---|---|---|
 | `image` | yes | HTTPS URL returning JPEG, PNG or WebP, at most 5 MiB. |
-| `audio` | no | HTTPS URL returning MP3, WAV or M4A, at most 25 MiB; omit or use `null` when unavailable. |
+| `audio` | no | HTTPS URL returning MP3, WAV, M4A or WebM, at most 25 MiB; omit or use `null` when unavailable. |
 | `outfitName` | yes | Non-blank text, at most 100 characters. |
 | `occasion` | yes | Event or situation (e.g. Party or Job Interview); non-blank, at most 100 characters. |
 | `category` | yes | Outfit classification (e.g. Western or Formal); non-blank, at most 100 characters. |
@@ -75,6 +75,8 @@ only to public IPv4 addresses; redirects, private addresses and non-HTTPS URLs
 are rejected. The source server must be reachable by Cloud Run without
 interactive browser authentication. Unknown fields and invalid media return
 `400`; unreachable URLs return `502`. Authentication is required.
+WebM voice recordings must be served with `Content-Type: audio/webm`; their
+WebM container signature is verified, but the presence of an audio track is not.
 The request waits for analysis to finish and returns `201` with exactly:
 
 ```json
@@ -93,8 +95,12 @@ For example:
 }
 ```
 
-`audio` may instead be omitted or set to `null`. Occasion and category are
-passed to Gemini as context. Request JSON is limited to 64 KiB.
+`audio` may instead be omitted or set to `null`. The image, optional voice
+note, outfit name, occasion, and category are passed to Gemini for analysis.
+Large voice notes are temporarily uploaded to the Gemini Files API and deletion
+is attempted afterward; failed cleanup is logged, and a crash or uncertain
+upload result may leave a temporary file until Gemini deletes it. Request JSON
+is limited to 64 KiB.
 
 ### Retrieve the analysis
 
@@ -156,16 +162,29 @@ Successful GET requests return the four records:
 
 ```json
 {
-  "outfit": { "outfitId": "uuid", "userId": "firebase-uid", "outfitName": "Summer Casual", "occasion": "Party", "category": "Casual", "createdAt": "2026-01-01T00:00:00.000Z", "status": "uploaded" },
-  "media": { "mediaId": "uuid", "outfitId": "uuid", "type": "photo", "PhotoStoragePath": "outfits/<id>/photos/front.jpg", "PhotoUrl": "https://firebasestorage.googleapis.com/...", "AudioStoragePath": "", "AudioUrl": "", "uploadedAt": "2026-01-01T00:00:00.000Z" },
-  "analysis": { "analysis_id": "uuid", "outfit_id": "uuid", "user_id": "firebase-uid", "image_url": "https://...", "style_category": "Casual", "outfit_title": "The everyday edit", "overall_score": 82, "summary": "...", "color_description": "...", "primary_colors": ["blue"], "strengths": ["..."], "next_direction": "...", "created_at": "2026-01-01T00:00:00.000Z" },
-  "scores": { "score_id": "uuid", "analysis_id": "uuid", "color_harmony_score": 90, "style_matching_score": 80, "balance_layering_score": 75, "accessories_score": 60, "created_at": "2026-01-01T00:00:00.000Z" }
+  "outfit": { "outfitId": "uuid", "userId": "firebase-uid", "outfitName": "Summer Casual", "occasion": "Party", "category": "Casual", "status": "uploaded", "analysis": { "summary": "...", "strengths": ["..."], "suggestions": ["..."], "colorPalette": ["blue"] } },
+  "media": { "mediaId": "uuid", "outfitId": "uuid", "type": "photo", "PhotoStoragePath": "outfits/uuid/photos/front.jpg", "PhotoUrl": "/api/outfits/uuid/photo", "AudioStoragePath": "", "AudioUrl": "" },
+  "analysis": { "analysis_id": "uuid", "outfit_id": "uuid", "user_id": "firebase-uid", "style_category": "Casual", "outfit_title": "The everyday edit", "overall_score": 82, "summary": "...", "color_description": "...", "primary_colors": ["blue"], "strengths": ["..."], "next_direction": "..." },
+  "scores": { "score_id": "uuid", "analysis_id": "uuid", "color_harmony_score": 90, "style_matching_score": 80, "balance_layering_score": 75, "accessories_score": 60 }
 }
 ```
 
-`PhotoUrl` points at the private bucket and is not publicly readable. A future
-authenticated retrieval or signed-URL flow must enforce ownership. Voice notes
-are stored but not analyzed.
+For outfits with a stored photo, `media.PhotoUrl` is a relative API path:
+`/api/outfits/<outfitId>/photo`. Fetch it from the backend using the Firebase
+`Authorization: Bearer <ID_TOKEN>` header, then use the returned image blob in
+the frontend. A plain `<img src>` cannot supply that header. The API checks
+outfit ownership and keeps the bucket private. Older media records without a
+storage path retain their original URL. Voice notes are stored and used as
+context for the analysis when present.
+
+```js
+const response = await fetch(new URL(analysis.media.PhotoUrl, backendUrl), {
+  headers: { Authorization: `Bearer ${await user.getIdToken()}` },
+});
+if (!response.ok) throw new Error(`Photo request failed: ${response.status}`);
+const photoUrl = URL.createObjectURL(await response.blob());
+// Use photoUrl as an image src, then call URL.revokeObjectURL(photoUrl) when done.
+```
 
 Unexpected failures return `500`; details are logged on the server, not
 returned to the client. The server uploads files and creates the pending

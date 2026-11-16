@@ -6,7 +6,7 @@ const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 15_000;
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
-const AUDIO_TYPES = new Set(["audio/mpeg", "audio/wav", "audio/mp4", "audio/x-m4a"]);
+const AUDIO_TYPES = new Set(["audio/mpeg", "audio/wav", "audio/mp4", "audio/x-m4a", "audio/webm"]);
 
 class InvalidMediaError extends Error {}
 class MediaFetchError extends Error {}
@@ -71,7 +71,9 @@ async function validateMediaContent(buffer, label, maxBytes, allowedTypes, conte
     if (error.name !== "EndOfStreamError") throw error;
   }
   const aliases = { "audio/x-m4a": "audio/mp4", "audio/x-wav": "audio/wav" };
-  const mimeType = detected && (aliases[detected.mime] || detected.mime);
+  const mimeType = detected?.mime === "video/webm" && label === "Audio" && contentType === "audio/webm"
+    ? "audio/webm"
+    : detected && (aliases[detected.mime] || detected.mime);
   const declaredType = aliases[contentType] || contentType;
   if (!mimeType || !allowedTypes.has(mimeType) || (declaredType &&
       declaredType !== "application/octet-stream" && declaredType !== mimeType)) {
@@ -163,7 +165,7 @@ function createAnalyzeService({ analyze, store, fetchMedia = downloadMedia }) {
       try {
         const analysis = await analyze({
           image: photo.buffer, mimeType: photo.mimeType, userId,
-          occasion: details.occasion, category: details.category,
+          outfitName: details.outfitName, occasion: details.occasion, category: details.category, audio: voice,
         });
         await store.completeAnalysis({ outfitId, userId, analysis });
       } catch (error) {
@@ -181,5 +183,5 @@ function createAnalyzeService({ analyze, store, fetchMedia = downloadMedia }) {
 
 module.exports = {
   createAnalyzeService, MAX_IMAGE_BYTES, MAX_AUDIO_BYTES, InvalidMediaError, MediaFetchError,
-  validateMediaUrl, validateMediaContent, resolvePublicIPv4,
+  validateMediaUrl, validateMediaContent, resolvePublicIPv4, downloadMedia,
 };

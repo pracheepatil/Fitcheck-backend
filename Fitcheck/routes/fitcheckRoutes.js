@@ -4,10 +4,11 @@ const { createAnalyzeController } = require("../controllers/analyzeController");
 function createFitcheckRouter(dependencies) {
   const router = express.Router();
   const { sendMessageController } = require("../controllers/messageController");
-  const { analyzeOutfit, getAnalysis } = createAnalyzeController(dependencies);
+  const { analyzeOutfit, getAnalysis, getPhoto } = createAnalyzeController(dependencies);
 
   router.post("/analyze", analyzeOutfit);
   router.get("/getOutfitAnalysis", getAnalysis);
+  router.get("/outfits/:outfitId/photo", getPhoto);
 
   router.post("/sendMessage", express.json(), sendMessageController);
   return router;

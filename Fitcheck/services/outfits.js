@@ -7,7 +7,9 @@ const COLLECTIONS = {
   scores: "fitcheck_outfit_analysis_scores",
 };
 const IMAGE_EXTENSIONS = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
-const AUDIO_EXTENSIONS = { "audio/mpeg": "mp3", "audio/wav": "wav", "audio/x-wav": "wav", "audio/mp4": "m4a", "audio/x-m4a": "m4a" };
+const AUDIO_EXTENSIONS = { "audio/mpeg": "mp3", "audio/wav": "wav", "audio/x-wav": "wav", "audio/mp4": "m4a", "audio/x-m4a": "m4a", "audio/webm": "webm" };
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
 class OutfitNotFoundError extends Error {}
 class OutfitMediaNotFoundError extends Error {}
@@ -31,15 +33,19 @@ function createOutfitStore(db, bucket) {
     return snapshot.data();
   }
 
+  async function mediaFor(outfitId) {
+    const record = await oneRecord(db.collection(COLLECTIONS.media).where("outfitId", "==", outfitId), OutfitMediaNotFoundError);
+    if (record.data().mediaId !== record.id) throw new OutfitDataConflictError();
+    return record.data();
+  }
+
   return {
     async getAnalysis({ outfitId, userId }) {
       const outfit = await ownedOutfit(outfitId, userId);
       if (outfit.status === "pending" || outfit.status === "failed") {
         return { status: outfit.status, outfitId };
       }
-      const mediaRecord = await oneRecord(db.collection(COLLECTIONS.media).where("outfitId", "==", outfitId), OutfitMediaNotFoundError);
-      if (mediaRecord.data().mediaId !== mediaRecord.id) throw new OutfitDataConflictError();
-      const media = mediaRecord.data();
+      const media = await mediaFor(outfitId);
       const record = await oneRecord(db.collection(COLLECTIONS.analysis).where("outfit_id", "==", outfitId), OutfitAnalysisNotFoundError);
       const analysis = record.data();
       if (analysis.user_id !== userId || analysis.analysis_id !== record.id) throw new OutfitDataConflictError();
@@ -57,7 +63,8 @@ function createOutfitStore(db, bucket) {
         },
         media: {
           mediaId: media.mediaId, outfitId: media.outfitId, type: media.type,
-          PhotoStoragePath: media.PhotoStoragePath, PhotoUrl: media.PhotoUrl,
+          PhotoStoragePath: media.PhotoStoragePath,
+          PhotoUrl: media.PhotoStoragePath ? `/api/outfits/${encodeURIComponent(outfitId)}/photo` : media.PhotoUrl,
           AudioStoragePath: media.AudioStoragePath ?? "", AudioUrl: media.AudioUrl ?? "",
         },
         analysis: {
@@ -73,6 +80,39 @@ function createOutfitStore(db, bucket) {
           balance_layering_score: scores.balance_layering_score, accessories_score: scores.accessories_score,
         },
       };
+    },
+
+    async getPhoto({ outfitId, userId }) {
+      await ownedOutfit(outfitId, userId);
+      const media = await mediaFor(outfitId);
+      const path = media.PhotoStoragePath;
+      if (typeof path !== "string" ||
+          (path !== `outfits/${outfitId}` && !path.startsWith(`outfits/${outfitId}/`))) {
+        throw new OutfitMediaNotFoundError();
+      }
+      let metadata;
+      let buffer;
+      try {
+        [metadata] = await bucket.file(path).getMetadata();
+        const size = Number(metadata.size);
+        if (!metadata.generation || !Number.isSafeInteger(size) || size <= 0 || size > MAX_IMAGE_BYTES) {
+          throw new OutfitDataConflictError();
+        }
+        [buffer] = await bucket.file(path, { generation: metadata.generation }).download();
+      } catch (error) {
+        if (error.code === 404 || error.code === "404") throw new OutfitMediaNotFoundError();
+        throw error;
+      }
+      if (buffer.length === 0 || buffer.length > MAX_IMAGE_BYTES) throw new OutfitDataConflictError();
+      const { fileTypeFromBuffer } = await import("file-type");
+      let type;
+      try {
+        type = await fileTypeFromBuffer(buffer);
+      } catch (error) {
+        if (error.name !== "EndOfStreamError") throw error;
+      }
+      if (!type || !IMAGE_TYPES.has(type.mime)) throw new OutfitDataConflictError();
+      return { buffer, mimeType: type.mime };
     },
 
     async createSubmission({ userId, image, mimeType, outfitName, occasion, category, audio }) {
