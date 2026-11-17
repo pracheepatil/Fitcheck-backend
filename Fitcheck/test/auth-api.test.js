@@ -74,6 +74,14 @@ test("merged authentication and analyzer routes are mounted together", async (t)
   assert.equal((await post("/api/auth/signin", { email: "test@example.test", password: "invalid" })).status, 401);
   assert.equal((await post("/api/auth/session", {})).status, 401);
   assert.equal((await post("/api/auth/session", {}, "test-token")).status, 200);
+  const sendMessage = await post("/api/sendMessage", {
+    name: "Test User",
+    email: "test@example.test",
+    subject: "Public endpoint test",
+    message: "This endpoint should work without an Authorization header.",
+  });
+  assert.equal(sendMessage.status, 201);
+  assert.equal((await sendMessage.json()).success, true);
   assert.equal((await fetch(`${url}/api/analyze`, { method: "POST" })).status, 401);
   const preflight = await fetch(`${url}/api/auth/signin`, {
     method: "OPTIONS", headers: { Origin: "http://localhost:3000", "Access-Control-Request-Method": "POST" },

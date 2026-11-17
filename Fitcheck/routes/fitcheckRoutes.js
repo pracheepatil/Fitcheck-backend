@@ -6,11 +6,11 @@ function createFitcheckRouter(dependencies) {
   const { sendMessageController } = require("../controllers/messageController");
   const { analyzeOutfit, getAnalysis, getPhoto } = createAnalyzeController(dependencies);
 
+  router.post("/sendMessage", express.json(), sendMessageController);
   router.post("/analyze", analyzeOutfit);
   router.get("/getOutfitAnalysis", getAnalysis);
   router.get("/outfits/:outfitId/photo", getPhoto);
 
-  router.post("/sendMessage", express.json(), sendMessageController);
   return router;
 }
 
