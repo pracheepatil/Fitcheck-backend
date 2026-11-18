@@ -7,8 +7,8 @@ function validOutfitId(id) {
     !/^__.*__$/.test(id) && id !== "." && id !== "..";
 }
 
-function createSaveInspirationController(dependencies) {
-  async function saveInspiration(req, res, next) {
+function createSaveFavouritesController(dependencies) {
+  async function saveFavourites(req, res, next) {
     const body = req.body;
     if (!body || typeof body !== "object" || Array.isArray(body) ||
         Object.keys(body).length !== 1 || !Object.hasOwn(body, "outfitId") ||
@@ -17,7 +17,7 @@ function createSaveInspirationController(dependencies) {
     }
 
     try {
-      const result = await dependencies.store.saveInspiration({
+      const result = await dependencies.store.saveFavourite({
         outfitId: body.outfitId,
         userId: req.user.uid,
       });
@@ -30,7 +30,7 @@ function createSaveInspirationController(dependencies) {
     }
   }
 
-  return [requireAuthentication(dependencies.auth), saveInspiration];
+  return [requireAuthentication(dependencies.auth), saveFavourites];
 }
 
-module.exports = { createSaveInspirationController };
+module.exports = { createSaveFavouritesController };

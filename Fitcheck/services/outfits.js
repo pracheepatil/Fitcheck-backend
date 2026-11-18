@@ -62,7 +62,7 @@ function createOutfitStore(db, bucket) {
       .get();
     const outfits = outfitsSnapshot.docs
       .map((record) => ({ ...record.data(), outfitId: record.id }))
-      .filter((outfit) => !inspirationsOnly || outfit.inspiration === true);
+      .filter((outfit) => !inspirationsOnly || outfit.favourite === true);
     const outfitIds = outfits.map((outfit) => outfit.outfitId);
     const mediaRecords = [];
     const analysisRecords = [];
@@ -103,18 +103,18 @@ function createOutfitStore(db, bucket) {
   }
 
   return {
-    async saveInspiration({ outfitId, userId }) {
+    async saveFavourite({ outfitId, userId }) {
       const outfitRef = db.collection(COLLECTIONS.details).doc(outfitId);
       await db.runTransaction(async (transaction) => {
         const outfitSnapshot = await transaction.get(outfitRef);
         if (!outfitSnapshot.exists || outfitSnapshot.data().userId !== userId) {
           throw new OutfitNotFoundError();
         }
-        if (outfitSnapshot.data().inspiration !== true) {
-          transaction.update(outfitRef, { inspiration: true });
+        if (outfitSnapshot.data().favourite !== true) {
+          transaction.update(outfitRef, { favourite: true });
         }
       });
-      return { outfitId, inspiration: true };
+      return { outfitId, favourite: true };
     },
 
     async getAverageAnalysis({ userId }) {
@@ -155,7 +155,7 @@ function createOutfitStore(db, bucket) {
         uploadedOutfitsCount: uploadedOutfitIds.size,
         averageOverallScore: average(analyses.map((record) => record.overall_score)),
         savedInspirationsCount: outfitsSnapshot.docs.filter((record) =>
-          record.data().inspiration === true
+          record.data().favourite === true
         ).length,
         averageFitScore: average(Object.values(averageStyleCriteriaScores)),
         averageStyleCriteriaScores,
@@ -166,7 +166,7 @@ function createOutfitStore(db, bucket) {
       return getUserFitList(userId);
     },
 
-    async getInspirationList({ userId }) {
+    async getFavouriteList({ userId }) {
       return getUserFitList(userId, true);
     },
 
@@ -186,7 +186,7 @@ function createOutfitStore(db, bucket) {
         outfit: {
           outfitId: outfit.outfitId, userId: outfit.userId, status: outfit.status,
           outfitName: outfit.outfitName ?? "", occasion: outfit.occasion ?? "", category: outfit.category ?? "",
-          inspiration: outfit.inspiration === true,
+          favourite: outfit.favourite === true,
         },
         media: {
           mediaId: media.mediaId, outfitId: media.outfitId, type: media.type,
@@ -243,7 +243,7 @@ function createOutfitStore(db, bucket) {
       return { buffer, mimeType: type.mime };
     },
 
-    async createSubmission({ userId, image, mimeType, outfitName, occasion, category, inspiration = false, audio }) {
+    async createSubmission({ userId, image, mimeType, outfitName, occasion, category, favourite = false, audio }) {
       const outfitId = randomUUID();
       const mediaId = randomUUID();
       const photoPath = `outfits/${outfitId}/photos/front.${IMAGE_EXTENSIONS[mimeType]}`;
@@ -271,7 +271,7 @@ function createOutfitStore(db, bucket) {
         const now = new Date();
         const batch = db.batch();
         batch.create(db.collection(COLLECTIONS.details).doc(outfitId), {
-          outfitId, userId, outfitName, occasion, category, inspiration, createdAt: now, status: "pending",
+          outfitId, userId, outfitName, occasion, category, favourite, createdAt: now, status: "pending",
         });
         batch.create(db.collection(COLLECTIONS.media).doc(mediaId), {
           mediaId, outfitId, type: "photo", uploadedAt: now,

@@ -151,10 +151,10 @@ function get(url, outfitId, token = "alice", userId = token) {
 test("getAverageAnalysis returns only the authenticated user's uploaded outfit averages and saved inspirations", async (t) => {
   const { db, url } = await setup(t);
   const records = [
-    ["fitcheck_outfit_details/outfit-a1", { outfitId: "outfit-a1", userId: "alice", status: "uploaded", inspiration: true }],
+    ["fitcheck_outfit_details/outfit-a1", { outfitId: "outfit-a1", userId: "alice", status: "uploaded", favourite: true }],
     ["fitcheck_outfit_details/outfit-a2", { outfitId: "outfit-a2", userId: "alice", status: "uploaded" }],
-    ["fitcheck_outfit_details/outfit-pending", { outfitId: "outfit-pending", userId: "alice", status: "pending", inspiration: true }],
-    ["fitcheck_outfit_details/outfit-b1", { outfitId: "outfit-b1", userId: "bob", status: "uploaded", inspiration: true }],
+    ["fitcheck_outfit_details/outfit-pending", { outfitId: "outfit-pending", userId: "alice", status: "pending", favourite: true }],
+    ["fitcheck_outfit_details/outfit-b1", { outfitId: "outfit-b1", userId: "bob", status: "uploaded", favourite: true }],
     ["fitcheck_outfit_analysis/analysis-a1", {
       analysis_id: "analysis-a1", outfit_id: "outfit-a1", user_id: "alice", overall_score: 80,
     }],
@@ -312,24 +312,24 @@ test("getMyFitList returns only the authenticated user's outfit details, photos,
   assert.equal((await fetch(`${url}/getMyFitList`)).status, 401);
 });
 
-test("getInspirationList returns only the authenticated user's outfits flagged as inspiration", async (t) => {
+test("getFavouriteList returns only the authenticated user's outfits marked favourite", async (t) => {
   const { db, url } = await setup(t);
   const records = [
     ["fitcheck_outfit_details/alice-saved", {
       userId: "alice", outfitName: "Saved look", occasion: "Dinner", category: "Formal",
-      status: "uploaded", inspiration: true,
+      status: "uploaded", favourite: true,
     }],
     ["fitcheck_outfit_details/alice-unsaved", {
       userId: "alice", outfitName: "Regular look", occasion: "Errands", category: "Casual",
-      status: "uploaded", inspiration: false,
+      status: "uploaded", favourite: false,
     }],
     ["fitcheck_outfit_details/alice-pending-saved", {
       userId: "alice", outfitName: "Pending saved look", occasion: "Party", category: "Casual",
-      status: "pending", inspiration: true,
+      status: "pending", favourite: true,
     }],
     ["fitcheck_outfit_details/bob-saved", {
       userId: "bob", outfitName: "Bob's saved look", occasion: "Work", category: "Business",
-      status: "uploaded", inspiration: true,
+      status: "uploaded", favourite: true,
     }],
     ["fitcheck_outfit_media/media-alice-saved", {
       outfitId: "alice-saved", PhotoUrl: "https://storage.example/alice-saved.jpg",
@@ -349,7 +349,7 @@ test("getInspirationList returns only the authenticated user's outfits flagged a
   ];
   records.forEach(([path, value]) => db.records.set(path, value));
 
-  const response = await fetch(`${url}/getInspirationList`, {
+  const response = await fetch(`${url}/getFavouriteList`, {
     headers: { Authorization: "Bearer alice" },
   });
   assert.equal(response.status, 200);
@@ -373,16 +373,16 @@ test("getInspirationList returns only the authenticated user's outfits flagged a
       },
     ],
   });
-  assert.equal((await fetch(`${url}/getInspirationList`)).status, 401);
+  assert.equal((await fetch(`${url}/getFavouriteList`)).status, 401);
 });
 
-test("saveInspiration updates only an authenticated owner's outfit and is idempotent", async (t) => {
+test("saveFavourites updates only an authenticated owner's outfit and is idempotent", async (t) => {
   const { db, url } = await setup(t);
   const created = await post(url, payload());
   assert.equal(created.status, 201);
   const { outfitId } = await created.json();
   const detailsPath = `fitcheck_outfit_details/${outfitId}`;
-  const request = (body, token = "alice") => fetch(`${url}/saveInspiration`, {
+  const request = (body, token = "alice") => fetch(`${url}/saveFavourites`, {
     method: "PUT",
     headers: {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -393,19 +393,19 @@ test("saveInspiration updates only an authenticated owner's outfit and is idempo
 
   assert.equal((await request({ outfitId }, null)).status, 401);
   assert.equal((await request({ outfitId }, "bob")).status, 404);
-  assert.equal(db.records.get(detailsPath).inspiration, false);
+  assert.equal(db.records.get(detailsPath).favourite, false);
   assert.equal((await request({ outfitId: " " })).status, 400);
-  assert.equal((await request({ outfitId, inspiration: true })).status, 400);
+  assert.equal((await request({ outfitId, favourite: true })).status, 400);
 
   const saved = await request({ outfitId });
   assert.equal(saved.status, 200);
-  assert.deepEqual(await saved.json(), { success: true, outfitId, inspiration: true });
-  assert.equal(db.records.get(detailsPath).inspiration, true);
+  assert.deepEqual(await saved.json(), { success: true, outfitId, favourite: true });
+  assert.equal(db.records.get(detailsPath).favourite, true);
 
   const repeatedSave = await request({ outfitId });
   assert.equal(repeatedSave.status, 200);
-  assert.equal(db.records.get(detailsPath).inspiration, true);
-  assert.equal((await (await get(url, outfitId)).json()).outfit.inspiration, true);
+  assert.equal(db.records.get(detailsPath).favourite, true);
+  assert.equal((await (await get(url, outfitId)).json()).outfit.favourite, true);
 });
 
 test("saves each submission and retrieves its linked analysis with a minimal response", async (t) => {
@@ -431,7 +431,7 @@ test("saves each submission and retrieves its linked analysis with a minimal res
   assert.equal(context.audio, undefined);
   const other = await second.json();
   assert.notEqual(result.outfitId, other.outfitId);
-  assert.equal(db.records.get(`fitcheck_outfit_details/${other.outfitId}`).inspiration, false);
+  assert.equal(db.records.get(`fitcheck_outfit_details/${other.outfitId}`).favourite, false);
   assert.equal(db.records.size, 8);
   assert.equal(bucket.files.size, 3);
 
@@ -440,7 +440,7 @@ test("saves each submission and retrieves its linked analysis with a minimal res
   assert.equal(details.outfitName, "Weekend");
   assert.equal(details.occasion, "Date Night");
   assert.equal(details.category, "Formal");
-  assert.equal(details.inspiration, false);
+  assert.equal(details.favourite, false);
   assert.equal(details.status, "uploaded");
   assert.ok(details.createdAt instanceof Date);
   const analysisPath = [...db.records.keys()].find((key) =>
@@ -454,7 +454,7 @@ test("saves each submission and retrieves its linked analysis with a minimal res
   const saved = await response.json();
   assert.deepEqual(Object.keys(saved).sort(), ["analysis", "media", "outfit", "scores"]);
   assert.equal(saved.outfit.outfitId, result.outfitId);
-  assert.equal(saved.outfit.inspiration, false);
+  assert.equal(saved.outfit.favourite, false);
   assert.equal(Object.hasOwn(saved.outfit, "analysis"), false);
   assert.equal(saved.analysis.outfit_id, result.outfitId);
   assert.equal(saved.analysis.user_id, "alice");
@@ -523,7 +523,7 @@ test("rejects malformed, unauthorized, and legacy requests before persistence", 
     payload({ image: "data:image/png;base64,AA==" }),
     payload({ image: "file:///etc/passwd" }),
     payload({ audio: "data:audio/wav;base64,AA==" }),
-    payload({ inspiration: false }),
+    payload({ favourite: false }),
     ...["outfitName", "occasion", "category"].flatMap((key) => [
       Object.fromEntries(Object.entries(valid).filter(([field]) => field !== key)),
       payload({ [key]: "   " }),
