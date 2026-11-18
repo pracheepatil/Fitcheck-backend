@@ -33,11 +33,13 @@ function fakeFirestore() {
     id: ref.path.split("/").pop(), ref, exists: records.has(ref.path), data: () => records.get(ref.path),
   });
   const ref = (path) => ({ path, get: async () => snapshot({ path }) });
-  const query = (name, field, value, max = 2) => ({
-    limit: (n) => query(name, field, value, n),
+  const query = (name, field, operator, value, max = Infinity) => ({
+    limit: (n) => query(name, field, operator, value, n),
     get: async () => {
       const docs = [...records.entries()].filter(([path, data]) =>
-        path.startsWith(`${name}/`) && data[field] === value).slice(0, max).map(([path]) => snapshot(ref(path)));
+        path.startsWith(`${name}/`) &&
+        (operator === "==" ? data[field] === value : value.includes(data[field]))
+      ).slice(0, max).map(([path]) => snapshot(ref(path)));
       return { docs, size: docs.length, empty: docs.length === 0 };
     },
   });
@@ -63,8 +65,8 @@ function fakeFirestore() {
     collection: (name) => ({
       doc: (id) => ref(`${name}/${id}`),
       where: (field, operator, value) => {
-        assert.equal(operator, "==");
-        return query(name, field, value);
+        assert.ok(["==", "in"].includes(operator));
+        return query(name, field, operator, value);
       },
     }),
     batch: () => {
@@ -118,7 +120,7 @@ async function setup(t, analyze = async () => analysis, fetchMedia = async (_url
   const bucket = fakeBucket();
   const auth = {
     verifyIdToken: async (token) => {
-      if (!["alice", "bob"].includes(token)) throw Object.assign(new Error("invalid"), { code: "auth/invalid-id-token" });
+      if (!["alice", "bob", "charlie"].includes(token)) throw Object.assign(new Error("invalid"), { code: "auth/invalid-id-token" });
       return { uid: token };
     },
   };
@@ -146,6 +148,266 @@ function get(url, outfitId, token = "alice", userId = token) {
   });
 }
 
+test("getAverageAnalysis returns only the authenticated user's uploaded outfit averages and saved inspirations", async (t) => {
+  const { db, url } = await setup(t);
+  const records = [
+    ["fitcheck_outfit_details/outfit-a1", { outfitId: "outfit-a1", userId: "alice", status: "uploaded", inspiration: true }],
+    ["fitcheck_outfit_details/outfit-a2", { outfitId: "outfit-a2", userId: "alice", status: "uploaded" }],
+    ["fitcheck_outfit_details/outfit-pending", { outfitId: "outfit-pending", userId: "alice", status: "pending", inspiration: true }],
+    ["fitcheck_outfit_details/outfit-b1", { outfitId: "outfit-b1", userId: "bob", status: "uploaded", inspiration: true }],
+    ["fitcheck_outfit_analysis/analysis-a1", {
+      analysis_id: "analysis-a1", outfit_id: "outfit-a1", user_id: "alice", overall_score: 80,
+    }],
+    ["fitcheck_outfit_analysis/analysis-a2", {
+      analysis_id: "analysis-a2", outfit_id: "outfit-a2", user_id: "alice", overall_score: 60,
+    }],
+    ["fitcheck_outfit_analysis/analysis-b1", {
+      analysis_id: "analysis-b1", outfit_id: "outfit-b1", user_id: "bob", overall_score: 100,
+    }],
+    ["fitcheck_outfit_analysis_scores/score-a1", {
+      analysis_id: "analysis-a1", color_harmony_score: 90, style_matching_score: 80,
+      balance_layering_score: 70, accessories_score: 60,
+    }],
+    ["fitcheck_outfit_analysis_scores/score-a2", {
+      analysis_id: "analysis-a2", color_harmony_score: 70, style_matching_score: 60,
+      balance_layering_score: 80, accessories_score: 90,
+    }],
+    ["fitcheck_outfit_analysis_scores/score-b1", {
+      analysis_id: "analysis-b1", color_harmony_score: 100, style_matching_score: 100,
+      balance_layering_score: 100, accessories_score: 100,
+    }],
+  ];
+  records.forEach(([path, value]) => db.records.set(path, value));
+
+  const alice = await fetch(`${url}/getAverageAnalysis`, {
+    headers: { Authorization: "Bearer alice" },
+  });
+  assert.equal(alice.status, 200);
+  assert.deepEqual(await alice.json(), {
+    uploadedOutfitsCount: 2,
+    averageOverallScore: 70,
+    savedInspirationsCount: 2,
+    averageFitScore: 75,
+    averageStyleCriteriaScores: {
+      colorHarmony: 80,
+      styleMatching: 70,
+      balanceLayering: 75,
+      accessories: 75,
+    },
+  });
+
+  const spoofedUserId = await fetch(`${url}/getAverageAnalysis?userId=bob`, {
+    headers: { Authorization: "Bearer alice" },
+  });
+  assert.equal(spoofedUserId.status, 200);
+  assert.deepEqual(await spoofedUserId.json(), {
+    uploadedOutfitsCount: 2,
+    averageOverallScore: 70,
+    savedInspirationsCount: 2,
+    averageFitScore: 75,
+    averageStyleCriteriaScores: {
+      colorHarmony: 80,
+      styleMatching: 70,
+      balanceLayering: 75,
+      accessories: 75,
+    },
+  });
+
+  const bob = await fetch(`${url}/getAverageAnalysis`, {
+    headers: { Authorization: "Bearer bob" },
+  });
+  assert.equal(bob.status, 200);
+  assert.deepEqual(await bob.json(), {
+    uploadedOutfitsCount: 1,
+    averageOverallScore: 100,
+    savedInspirationsCount: 1,
+    averageFitScore: 100,
+    averageStyleCriteriaScores: {
+      colorHarmony: 100,
+      styleMatching: 100,
+      balanceLayering: 100,
+      accessories: 100,
+    },
+  });
+  const noScores = await fetch(`${url}/getAverageAnalysis`, {
+    headers: { Authorization: "Bearer charlie" },
+  });
+  assert.equal(noScores.status, 200);
+  assert.deepEqual(await noScores.json(), {
+    uploadedOutfitsCount: 0,
+    averageOverallScore: null,
+    savedInspirationsCount: 0,
+    averageFitScore: null,
+    averageStyleCriteriaScores: {
+      colorHarmony: null,
+      styleMatching: null,
+      balanceLayering: null,
+      accessories: null,
+    },
+  });
+  assert.equal((await fetch(`${url}/getAverageAnalysis`)).status, 401);
+});
+
+test("getMyFitList returns only the authenticated user's outfit details, photos, and overall scores", async (t) => {
+  const { db, url } = await setup(t);
+  const records = [
+    ["fitcheck_outfit_details/alice-outfit-1", {
+      userId: "alice", outfitName: "Weekend look", occasion: "Brunch", category: "Casual", status: "uploaded",
+    }],
+    ["fitcheck_outfit_details/alice-outfit-2", {
+      userId: "alice", outfitName: "Office look", occasion: "Work", category: "Formal", status: "pending",
+    }],
+    ["fitcheck_outfit_details/bob-outfit-1", {
+      userId: "bob", outfitName: "Bob look", occasion: "Party", category: "Streetwear", status: "uploaded",
+    }],
+    ["fitcheck_outfit_media/media-alice-1", {
+      mediaId: "media-alice-1", outfitId: "alice-outfit-1",
+      PhotoStoragePath: "outfits/alice-outfit-1/photos/front.jpg",
+      PhotoUrl: "https://storage.example/photo.jpg",
+    }],
+    ["fitcheck_outfit_media/media-alice-2", {
+      mediaId: "media-alice-2", outfitId: "alice-outfit-2",
+      PhotoStoragePath: "", PhotoUrl: "https://storage.example/pending-photo.jpg",
+    }],
+    ["fitcheck_outfit_media/media-bob-1", {
+      mediaId: "media-bob-1", outfitId: "bob-outfit-1",
+      PhotoStoragePath: "outfits/bob-outfit-1/photos/front.jpg",
+      PhotoUrl: "https://storage.example/bob-photo.jpg",
+    }],
+    ["fitcheck_outfit_analysis/analysis-alice-1", {
+      analysis_id: "analysis-alice-1", outfit_id: "alice-outfit-1",
+      user_id: "alice", overall_score: 86,
+    }],
+    ["fitcheck_outfit_analysis/analysis-bob-1", {
+      analysis_id: "analysis-bob-1", outfit_id: "bob-outfit-1",
+      user_id: "bob", overall_score: 99,
+    }],
+  ];
+  records.forEach(([path, value]) => db.records.set(path, value));
+
+  const response = await fetch(`${url}/getMyFitList`, {
+    headers: { Authorization: "Bearer alice" },
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    outfits: [
+      {
+        outfitId: "alice-outfit-1",
+        category: "Casual",
+        occasion: "Brunch",
+        outfitName: "Weekend look",
+        photoUrl: "https://storage.example/photo.jpg",
+        averageOutfitScore: 86,
+      },
+      {
+        outfitId: "alice-outfit-2",
+        category: "Formal",
+        occasion: "Work",
+        outfitName: "Office look",
+        photoUrl: "https://storage.example/pending-photo.jpg",
+        averageOutfitScore: null,
+      },
+    ],
+  });
+  assert.equal((await fetch(`${url}/getMyFitList`)).status, 401);
+});
+
+test("getInspirationList returns only the authenticated user's outfits flagged as inspiration", async (t) => {
+  const { db, url } = await setup(t);
+  const records = [
+    ["fitcheck_outfit_details/alice-saved", {
+      userId: "alice", outfitName: "Saved look", occasion: "Dinner", category: "Formal",
+      status: "uploaded", inspiration: true,
+    }],
+    ["fitcheck_outfit_details/alice-unsaved", {
+      userId: "alice", outfitName: "Regular look", occasion: "Errands", category: "Casual",
+      status: "uploaded", inspiration: false,
+    }],
+    ["fitcheck_outfit_details/alice-pending-saved", {
+      userId: "alice", outfitName: "Pending saved look", occasion: "Party", category: "Casual",
+      status: "pending", inspiration: true,
+    }],
+    ["fitcheck_outfit_details/bob-saved", {
+      userId: "bob", outfitName: "Bob's saved look", occasion: "Work", category: "Business",
+      status: "uploaded", inspiration: true,
+    }],
+    ["fitcheck_outfit_media/media-alice-saved", {
+      outfitId: "alice-saved", PhotoUrl: "https://storage.example/alice-saved.jpg",
+    }],
+    ["fitcheck_outfit_media/media-alice-pending", {
+      outfitId: "alice-pending-saved", PhotoUrl: "https://storage.example/alice-pending.jpg",
+    }],
+    ["fitcheck_outfit_media/media-bob-saved", {
+      outfitId: "bob-saved", PhotoUrl: "https://storage.example/bob-saved.jpg",
+    }],
+    ["fitcheck_outfit_analysis/analysis-alice-saved", {
+      outfit_id: "alice-saved", user_id: "alice", overall_score: 91,
+    }],
+    ["fitcheck_outfit_analysis/analysis-bob-saved", {
+      outfit_id: "bob-saved", user_id: "bob", overall_score: 99,
+    }],
+  ];
+  records.forEach(([path, value]) => db.records.set(path, value));
+
+  const response = await fetch(`${url}/getInspirationList`, {
+    headers: { Authorization: "Bearer alice" },
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    outfits: [
+      {
+        outfitId: "alice-saved",
+        category: "Formal",
+        occasion: "Dinner",
+        outfitName: "Saved look",
+        photoUrl: "https://storage.example/alice-saved.jpg",
+        averageOutfitScore: 91,
+      },
+      {
+        outfitId: "alice-pending-saved",
+        category: "Casual",
+        occasion: "Party",
+        outfitName: "Pending saved look",
+        photoUrl: "https://storage.example/alice-pending.jpg",
+        averageOutfitScore: null,
+      },
+    ],
+  });
+  assert.equal((await fetch(`${url}/getInspirationList`)).status, 401);
+});
+
+test("saveInspiration updates only an authenticated owner's outfit and is idempotent", async (t) => {
+  const { db, url } = await setup(t);
+  const created = await post(url, payload());
+  assert.equal(created.status, 201);
+  const { outfitId } = await created.json();
+  const detailsPath = `fitcheck_outfit_details/${outfitId}`;
+  const request = (body, token = "alice") => fetch(`${url}/saveInspiration`, {
+    method: "PUT",
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  assert.equal((await request({ outfitId }, null)).status, 401);
+  assert.equal((await request({ outfitId }, "bob")).status, 404);
+  assert.equal(db.records.get(detailsPath).inspiration, false);
+  assert.equal((await request({ outfitId: " " })).status, 400);
+  assert.equal((await request({ outfitId, inspiration: true })).status, 400);
+
+  const saved = await request({ outfitId });
+  assert.equal(saved.status, 200);
+  assert.deepEqual(await saved.json(), { success: true, outfitId, inspiration: true });
+  assert.equal(db.records.get(detailsPath).inspiration, true);
+
+  const repeatedSave = await request({ outfitId });
+  assert.equal(repeatedSave.status, 200);
+  assert.equal(db.records.get(detailsPath).inspiration, true);
+  assert.equal((await (await get(url, outfitId)).json()).outfit.inspiration, true);
+});
+
 test("saves each submission and retrieves its linked analysis with a minimal response", async (t) => {
   let context;
   const { db, bucket, url } = await setup(t, async (input) => { context = input; return analysis; },
@@ -169,6 +431,7 @@ test("saves each submission and retrieves its linked analysis with a minimal res
   assert.equal(context.audio, undefined);
   const other = await second.json();
   assert.notEqual(result.outfitId, other.outfitId);
+  assert.equal(db.records.get(`fitcheck_outfit_details/${other.outfitId}`).inspiration, false);
   assert.equal(db.records.size, 8);
   assert.equal(bucket.files.size, 3);
 
@@ -177,6 +440,7 @@ test("saves each submission and retrieves its linked analysis with a minimal res
   assert.equal(details.outfitName, "Weekend");
   assert.equal(details.occasion, "Date Night");
   assert.equal(details.category, "Formal");
+  assert.equal(details.inspiration, false);
   assert.equal(details.status, "uploaded");
   assert.ok(details.createdAt instanceof Date);
   const analysisPath = [...db.records.keys()].find((key) =>
@@ -190,6 +454,7 @@ test("saves each submission and retrieves its linked analysis with a minimal res
   const saved = await response.json();
   assert.deepEqual(Object.keys(saved).sort(), ["analysis", "media", "outfit", "scores"]);
   assert.equal(saved.outfit.outfitId, result.outfitId);
+  assert.equal(saved.outfit.inspiration, false);
   assert.equal(Object.hasOwn(saved.outfit, "analysis"), false);
   assert.equal(saved.analysis.outfit_id, result.outfitId);
   assert.equal(saved.analysis.user_id, "alice");
@@ -258,6 +523,7 @@ test("rejects malformed, unauthorized, and legacy requests before persistence", 
     payload({ image: "data:image/png;base64,AA==" }),
     payload({ image: "file:///etc/passwd" }),
     payload({ audio: "data:audio/wav;base64,AA==" }),
+    payload({ inspiration: false }),
     ...["outfitName", "occasion", "category"].flatMap((key) => [
       Object.fromEntries(Object.entries(valid).filter(([field]) => field !== key)),
       payload({ [key]: "   " }),
@@ -294,6 +560,7 @@ test("takes image and optional audio URLs from req.body and passes occasion/cate
       received.push({ sourceUrl, label });
       return { buffer: label === "Image" ? webp : m4a, mimeType: label === "Image" ? "image/webp" : "audio/mp4" };
     });
+
   const response = await post(url, payload({ image: imageUrl, audio: audioUrl, occasion: "Job Interview", category: "Formal" }));
   assert.equal(response.status, 201);
   const { outfitId } = await response.json();
