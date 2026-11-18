@@ -53,6 +53,30 @@ The merged backend also exposes `POST /api/auth/signup` (JSON `email`,
 and `POST /api/auth/session` (Firebase ID token). `GET /api/health` checks
 that the server is responding.
 
+### My Fits and Style Mentor
+
+`GET /api/outfits` returns the authenticated user's successfully uploaded
+outfits as `{ "outfits": [...] }`. Each entry contains `outfitId`,
+`outfitName`, `occasion`, `category`, `status`, and `photoUrl`. The photo URL
+is an authenticated backend endpoint; fetch it with the same bearer token.
+New uploads have `Inspiration: true` and `style: "uploaded"` in their outfit
+details. The list excludes records with conflicting values and includes older
+uploaded records that lack either field. Pending and failed submissions are
+not listed.
+
+`GET /api/outfits/{outfitId}/style-tips` generates fresh tips for an owned
+outfit, using its stored photo, occasion and category. It returns:
+
+```json
+{ "outfitId": "uuid", "tips": ["Try a neutral jacket with the skirt."] }
+```
+
+Tips are generated on each request and are not saved to Firestore or Storage.
+Missing or unowned outfits and missing photos return `404`; authentication is
+required. Gemini or other unexpected failures return `500` and are logged.
+The responses are private and marked `no-store`. Gemini may occasionally make
+mistakes about an image, so tips should be treated as suggestions.
+
 ### Submit an outfit
 
 `POST /analyze` (also `/api/analyze`) requires `application/json`. The backend
