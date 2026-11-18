@@ -146,6 +146,103 @@ Auth instance. Copy the ID token into a private terminal session as
 `POST /api/auth/signin` also returns `idToken` and `user.uid`. ID tokens expire,
 so obtain a fresh one if necessary.
 
+### Get dashboard averages
+
+`GET /api/getAverageAnalysis` requires a Firebase ID token and derives the
+user ID from it. It returns counts for that user's uploaded outfits and saved
+inspirations, plus average overall and style-criteria scores across completed
+analyses. Style Journey data is not included.
+
+```sh
+curl "$BASE_URL/api/getAverageAnalysis" \
+  -H "Authorization: Bearer $FIREBASE_ID_TOKEN"
+```
+
+Example response:
+
+```json
+{
+  "uploadedOutfitsCount": 4,
+  "averageOverallScore": 89,
+  "averageFitScore": 90.25,
+  "savedInspirationsCount": 2,
+  "averageStyleCriteriaScores": {
+    "colorHarmony": 95,
+    "styleMatching": 92,
+    "balanceLayering": 88,
+    "accessories": 86
+  }
+}
+```
+
+Scores are averaged only over valid saved scores and rounded to two decimal
+places. `averageFitScore` is the average of the available style-criteria
+averages; it is `null` if there are no valid criterion scores.
+Saved inspirations are the signed-in user's outfit records whose `inspiration`
+field is exactly `true`.
+
+### List the signed-in user's outfits
+
+`GET /api/getMyFitList` requires a Firebase ID token and returns outfit details
+belonging to that token's user ID. Each item includes its category, occasion,
+outfit name, photo URL, and the analysis `overall_score` as
+`averageOutfitScore`. The score is `null` until analysis is available.
+`photoUrl` is returned directly from the media record's stored `PhotoUrl`.
+
+```sh
+curl "$BASE_URL/api/getMyFitList" \
+  -H "Authorization: Bearer $FIREBASE_ID_TOKEN"
+```
+
+Example response:
+
+```json
+{
+  "outfits": [
+    {
+      "outfitId": "outfit-uuid",
+      "category": "Casual",
+      "occasion": "Brunch",
+      "outfitName": "Weekend look",
+      "photoUrl": "/api/outfits/outfit-uuid/photo",
+      "averageOutfitScore": 86
+    }
+  ]
+}
+```
+
+### List saved inspirations
+
+`GET /api/getInspirationList` requires a Firebase ID token and returns the same
+outfit fields as `/api/getMyFitList`, limited to the signed-in user's outfit
+records whose `inspiration` field is exactly `true`.
+
+```sh
+curl "$BASE_URL/api/getInspirationList" \
+  -H "Authorization: Bearer $FIREBASE_ID_TOKEN"
+```
+
+The response uses the same `{ "outfits": [...] }` shape as `/getMyFitList`;
+it returns an empty array when the user has no saved inspirations.
+
+### Save an outfit as inspiration
+
+`PATCH /api/saveInspiration` requires a Firebase ID token and a JSON body
+containing only the outfit ID. The backend verifies that the outfit belongs to
+the signed-in user before setting `inspiration` to `true`. Repeating the
+request is safe and leaves the field set to `true`.
+
+```sh
+curl -X PATCH "$BASE_URL/api/saveInspiration" \
+  -H "Authorization: Bearer $FIREBASE_ID_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"outfitId":"OUTFIT_ID"}'
+```
+
+Success returns `200` with `{"success":true,"outfitId":"...","inspiration":true}`.
+Invalid input returns `400`; a missing, nonexistent, or another user's outfit
+returns `404`.
+
 ```sh
 export BASE_URL="http://localhost:5001"
 # Obtain a Firebase ID token securely; do not commit or share it.
@@ -169,8 +266,10 @@ allowed; if unset the existing wildcard behavior remains.
 Each completed upload has one linked record in each collection:
 
 - `fitcheck_outfit_details`: `outfitId`, `userId`, `outfitName`, `occasion`,
-  `category`, `Inspiration` (boolean), `style` (`uploaded` for new uploads),
-  `createdAt` (Timestamp), `status` (`pending`, `uploaded`, or `failed`).
+  `category`, `inspiration` (saved-inspiration flag, defaults to `false`),
+  `Inspiration` (My Fits filter flag), `style` (`uploaded` for new uploads),
+  `createdAt` (Timestamp),
+  `status` (`pending`, `uploaded`, or `failed`).
 - `fitcheck_outfit_media`: `mediaId`, `outfitId`, `type` (`photo`),
   `PhotoStoragePath`, `PhotoUrl`, `AudioStoragePath`, `AudioUrl` (empty when no
   voice note), `uploadedAt`. Files are stored under `outfits/<outfitId>/photos/` and
@@ -187,7 +286,7 @@ Successful GET requests return the four records:
 
 ```json
 {
-  "outfit": { "outfitId": "uuid", "userId": "firebase-uid", "outfitName": "Summer Casual", "occasion": "Party", "category": "Casual", "status": "uploaded", "analysis": { "summary": "...", "strengths": ["..."], "suggestions": ["..."], "colorPalette": ["blue"] } },
+  "outfit": { "outfitId": "uuid", "userId": "firebase-uid", "outfitName": "Summer Casual", "occasion": "Party", "category": "Casual", "inspiration": false, "status": "uploaded", "analysis": { "summary": "...", "strengths": ["..."], "suggestions": ["..."], "colorPalette": ["blue"] } },
   "media": { "mediaId": "uuid", "outfitId": "uuid", "type": "photo", "PhotoStoragePath": "outfits/uuid/photos/front.jpg", "PhotoUrl": "/api/outfits/uuid/photo", "AudioStoragePath": "", "AudioUrl": "" },
   "analysis": { "analysis_id": "uuid", "outfit_id": "uuid", "user_id": "firebase-uid", "style_category": "Casual", "outfit_title": "The everyday edit", "overall_score": 82, "summary": "...", "color_description": "...", "primary_colors": ["blue"], "strengths": ["..."], "next_direction": "..." },
   "scores": { "score_id": "uuid", "analysis_id": "uuid", "color_harmony_score": 90, "style_matching_score": 80, "balance_layering_score": 75, "accessories_score": 60 }

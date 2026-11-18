@@ -10,6 +10,13 @@ const IMAGE_EXTENSIONS = { "image/jpeg": "jpg", "image/png": "png", "image/webp"
 const AUDIO_EXTENSIONS = { "audio/mpeg": "mp3", "audio/wav": "wav", "audio/x-wav": "wav", "audio/mp4": "m4a", "audio/x-m4a": "m4a", "audio/webm": "webm" };
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const FIRESTORE_IN_QUERY_LIMIT = 30;
+const SCORE_FIELDS = {
+  colorHarmony: "color_harmony_score",
+  styleMatching: "style_matching_score",
+  balanceLayering: "balance_layering_score",
+  accessories: "accessories_score",
+};
 
 class OutfitNotFoundError extends Error {}
 class OutfitMediaNotFoundError extends Error {}
@@ -41,6 +48,60 @@ function createOutfitStore(db, bucket) {
     return record.data();
   }
 
+  function average(values) {
+    const validValues = values.filter((value) =>
+      typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100
+    );
+    if (!validValues.length) return null;
+    return Math.round((validValues.reduce((sum, value) => sum + value, 0) / validValues.length) * 100) / 100;
+  }
+
+  async function getUserFitList(userId, inspirationsOnly = false) {
+    const outfitsSnapshot = await db.collection(COLLECTIONS.details)
+      .where("userId", "==", userId)
+      .get();
+    const outfits = outfitsSnapshot.docs
+      .map((record) => ({ ...record.data(), outfitId: record.id }))
+      .filter((outfit) => !inspirationsOnly || outfit.inspiration === true);
+    const outfitIds = outfits.map((outfit) => outfit.outfitId);
+    const mediaRecords = [];
+    const analysisRecords = [];
+
+    for (let offset = 0; offset < outfitIds.length; offset += FIRESTORE_IN_QUERY_LIMIT) {
+      const batchIds = outfitIds.slice(offset, offset + FIRESTORE_IN_QUERY_LIMIT);
+      const [mediaSnapshot, analysisSnapshot] = await Promise.all([
+        db.collection(COLLECTIONS.media).where("outfitId", "in", batchIds).get(),
+        db.collection(COLLECTIONS.analysis).where("outfit_id", "in", batchIds).get(),
+      ]);
+      mediaRecords.push(...mediaSnapshot.docs.map((record) => record.data()));
+      analysisRecords.push(...analysisSnapshot.docs.map((record) => record.data()));
+    }
+
+    const mediaByOutfitId = new Map(
+      mediaRecords.map((record) => [record.outfitId, record])
+    );
+    const analysisByOutfitId = new Map(
+      analysisRecords
+        .filter((record) => record.user_id === userId)
+        .map((record) => [record.outfit_id, record])
+    );
+
+    return outfits.map((outfit) => {
+      const media = mediaByOutfitId.get(outfit.outfitId);
+      const analysis = analysisByOutfitId.get(outfit.outfitId);
+      return {
+        outfitId: outfit.outfitId,
+        category: outfit.category ?? "",
+        occasion: outfit.occasion ?? "",
+        outfitName: outfit.outfitName ?? "",
+        photoUrl: media?.PhotoUrl ?? "",
+        averageOutfitScore: typeof analysis?.overall_score === "number"
+          ? analysis.overall_score
+          : null,
+      };
+    });
+  }
+
   return {
     async listOutfits({ userId }) {
       const snapshot = await db.collection(COLLECTIONS.details).where("userId", "==", userId).get();
@@ -64,6 +125,73 @@ function createOutfitStore(db, bucket) {
       return ownedOutfit(outfitId, userId);
     },
 
+    async saveInspiration({ outfitId, userId }) {
+      const outfitRef = db.collection(COLLECTIONS.details).doc(outfitId);
+      await db.runTransaction(async (transaction) => {
+        const outfitSnapshot = await transaction.get(outfitRef);
+        if (!outfitSnapshot.exists || outfitSnapshot.data().userId !== userId) {
+          throw new OutfitNotFoundError();
+        }
+        if (outfitSnapshot.data().inspiration !== true) {
+          transaction.update(outfitRef, { inspiration: true });
+        }
+      });
+      return { outfitId, inspiration: true };
+    },
+
+    async getAverageAnalysis({ userId }) {
+      const [outfitsSnapshot, analysesSnapshot] = await Promise.all([
+        db.collection(COLLECTIONS.details).where("userId", "==", userId).get(),
+        db.collection(COLLECTIONS.analysis).where("user_id", "==", userId).get(),
+      ]);
+      const uploadedOutfitIds = new Set(
+        outfitsSnapshot.docs
+          .filter((record) => record.data().status === "uploaded")
+          .map((record) => record.id)
+      );
+      const analyses = analysesSnapshot.docs
+        .map((record) => record.data())
+        .filter((record) => uploadedOutfitIds.has(record.outfit_id));
+      const analysisIds = analyses.map((record) => record.analysis_id);
+      const scoreRecords = [];
+      for (let offset = 0; offset < analysisIds.length; offset += FIRESTORE_IN_QUERY_LIMIT) {
+        const scoreSnapshot = await db.collection(COLLECTIONS.scores)
+          .where("analysis_id", "in", analysisIds.slice(offset, offset + FIRESTORE_IN_QUERY_LIMIT))
+          .get();
+        scoreRecords.push(...scoreSnapshot.docs.map((record) => record.data()));
+      }
+      const scoresByAnalysisId = new Map(
+        scoreRecords.map((record) => [record.analysis_id, record])
+      );
+      const userScores = analyses
+        .map((record) => scoresByAnalysisId.get(record.analysis_id))
+        .filter(Boolean);
+      const averageStyleCriteriaScores = Object.fromEntries(
+        Object.entries(SCORE_FIELDS).map(([field, storedField]) => [
+          field,
+          average(userScores.map((record) => record[storedField])),
+        ])
+      );
+
+      return {
+        uploadedOutfitsCount: uploadedOutfitIds.size,
+        averageOverallScore: average(analyses.map((record) => record.overall_score)),
+        savedInspirationsCount: outfitsSnapshot.docs.filter((record) =>
+          record.data().inspiration === true
+        ).length,
+        averageFitScore: average(Object.values(averageStyleCriteriaScores)),
+        averageStyleCriteriaScores,
+      };
+    },
+
+    async getMyFitList({ userId }) {
+      return getUserFitList(userId);
+    },
+
+    async getInspirationList({ userId }) {
+      return getUserFitList(userId, true);
+    },
+
     async getAnalysis({ outfitId, userId }) {
       const outfit = await ownedOutfit(outfitId, userId);
       if (outfit.status === "pending" || outfit.status === "failed") {
@@ -80,6 +208,7 @@ function createOutfitStore(db, bucket) {
         outfit: {
           outfitId: outfit.outfitId, userId: outfit.userId, status: outfit.status,
           outfitName: outfit.outfitName ?? "", occasion: outfit.occasion ?? "", category: outfit.category ?? "",
+          inspiration: outfit.inspiration === true,
         },
         media: {
           mediaId: media.mediaId, outfitId: media.outfitId, type: media.type,
@@ -136,7 +265,7 @@ function createOutfitStore(db, bucket) {
       return { buffer, mimeType: type.mime };
     },
 
-    async createSubmission({ userId, image, mimeType, outfitName, occasion, category, audio }) {
+    async createSubmission({ userId, image, mimeType, outfitName, occasion, category, inspiration = false, audio }) {
       const outfitId = randomUUID();
       const mediaId = randomUUID();
       const photoPath = `outfits/${outfitId}/photos/front.${IMAGE_EXTENSIONS[mimeType]}`;
@@ -164,7 +293,7 @@ function createOutfitStore(db, bucket) {
         const now = new Date();
         const batch = db.batch();
         batch.create(db.collection(COLLECTIONS.details).doc(outfitId), {
-          outfitId, userId, outfitName, occasion, category, Inspiration: true, style: "uploaded",
+          outfitId, userId, outfitName, occasion, category, inspiration, Inspiration: true, style: "uploaded",
           createdAt: now, status: "pending",
         });
         batch.create(db.collection(COLLECTIONS.media).doc(mediaId), {
