@@ -19,6 +19,8 @@ class OutfitDataConflictError extends Error {}
 function createOutfitStore(db, bucket) {
   const urlFor = (path) =>
     `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(path)}?alt=media`;
+  const photoEndpointUrl = (outfitId) =>
+    `/api/outfits/${encodeURIComponent(outfitId)}/photo`;
 
   async function oneRecord(query, missingError) {
     const snapshot = await query.limit(2).get();
@@ -56,19 +58,16 @@ function createOutfitStore(db, bucket) {
         outfit: {
           outfitId: outfit.outfitId, userId: outfit.userId, status: outfit.status,
           outfitName: outfit.outfitName ?? "", occasion: outfit.occasion ?? "", category: outfit.category ?? "",
-          analysis: {
-            summary: analysis.summary, strengths: analysis.strengths,
-            suggestions: [analysis.next_direction], colorPalette: analysis.primary_colors,
-          },
         },
         media: {
           mediaId: media.mediaId, outfitId: media.outfitId, type: media.type,
           PhotoStoragePath: media.PhotoStoragePath,
-          PhotoUrl: media.PhotoStoragePath ? `/api/outfits/${encodeURIComponent(outfitId)}/photo` : media.PhotoUrl,
+          PhotoUrl: media.PhotoStoragePath ? photoEndpointUrl(outfitId) : media.PhotoUrl,
           AudioStoragePath: media.AudioStoragePath ?? "", AudioUrl: media.AudioUrl ?? "",
         },
         analysis: {
           analysis_id: analysis.analysis_id, outfit_id: analysis.outfit_id, user_id: analysis.user_id,
+          image_url: analysis.image_url,
           style_category: analysis.style_category, outfit_title: analysis.outfit_title,
           overall_score: analysis.overall_score, summary: analysis.summary,
           color_description: analysis.color_description, primary_colors: analysis.primary_colors,
@@ -184,7 +183,7 @@ function createOutfitStore(db, bucket) {
         const { scores, ...feedback } = analysis;
         transaction.create(db.collection(COLLECTIONS.analysis).doc(analysisId), {
           analysis_id: analysisId, outfit_id: outfitId, user_id: userId,
-          image_url: media.docs[0].data().PhotoUrl, ...feedback, created_at: now,
+          image_url: photoEndpointUrl(outfitId), ...feedback, created_at: now,
         });
         transaction.create(db.collection(COLLECTIONS.scores).doc(scoreId), {
           score_id: scoreId, analysis_id: analysisId, ...scores, created_at: now,
