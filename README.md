@@ -53,19 +53,11 @@ The merged backend also exposes `POST /api/auth/signup` (JSON `email`,
 and `POST /api/auth/session` (Firebase ID token). `GET /api/health` checks
 that the server is responding.
 
-### My Fits and Style Mentor
-
-`GET /api/outfits` returns the authenticated user's successfully uploaded
-outfits as `{ "outfits": [...] }`. Each entry contains `outfitId`,
-`outfitName`, `occasion`, `category`, `status`, and `photoUrl`. The photo URL
-is an authenticated backend endpoint; fetch it with the same bearer token.
-New uploads have `Inspiration: true` and `style: "uploaded"` in their outfit
-details. The list excludes records with conflicting values and includes older
-uploaded records that lack either field. Pending and failed submissions are
-not listed.
+### Style Mentor
 
 `GET /api/outfits/{outfitId}/style-tips` generates fresh tips for an owned
-outfit, using its stored photo, occasion and category. It returns:
+outfit, using its stored photo, occasion and category. Use the `outfitId`
+returned by `GET /api/getMyFitList`. It returns:
 
 ```json
 { "outfitId": "uuid", "tips": ["Try a neutral jacket with the skirt."] }

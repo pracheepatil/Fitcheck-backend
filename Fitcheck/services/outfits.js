@@ -103,6 +103,10 @@ function createOutfitStore(db, bucket) {
   }
 
   return {
+    async getOutfit({ outfitId, userId }) {
+      return ownedOutfit(outfitId, userId);
+    },
+
     async saveFavourite({ outfitId, userId }) {
       const outfitRef = db.collection(COLLECTIONS.details).doc(outfitId);
       await db.runTransaction(async (transaction) => {

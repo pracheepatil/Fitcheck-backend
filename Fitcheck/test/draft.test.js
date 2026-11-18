@@ -148,24 +148,6 @@ function get(url, outfitId, token = "alice", userId = token) {
   });
 }
 
-test("lists only the user's uploaded fits, including legacy records without filter fields", async (t) => {
-  const { db, url } = await setup(t);
-  const upload = await (await post(url, payload())).json();
-  const prefix = "fitcheck_outfit_details/";
-  db.records.set(`${prefix}legacy`, { userId: "alice", status: "uploaded", outfitName: "Legacy" });
-  db.records.set(`${prefix}excluded`, { userId: "alice", status: "uploaded", Inspiration: false, style: "uploaded" });
-  db.records.set(`${prefix}other-style`, { userId: "alice", status: "uploaded", Inspiration: true, style: "saved" });
-  db.records.set(`${prefix}pending`, { userId: "alice", status: "pending", Inspiration: true, style: "uploaded" });
-  db.records.set(`${prefix}other-user`, { userId: "bob", status: "uploaded", Inspiration: true, style: "uploaded" });
-  assert.equal((await fetch(`${url}/outfits`)).status, 401);
-  const response = await fetch(`${url}/outfits`, { headers: { Authorization: "Bearer alice" } });
-  assert.equal(response.status, 200);
-  assert.equal(response.headers.get("cache-control"), "private, no-store");
-  const { outfits } = await response.json();
-  assert.deepEqual(outfits.map((item) => item.outfitId).sort(), [upload.outfitId, "legacy"].sort());
-  assert.equal(outfits.find((item) => item.outfitId === upload.outfitId).photoUrl, `/api/outfits/${upload.outfitId}/photo`);
-});
-
 test("generates style tips for an owned photo without saving results", async (t) => {
   let context;
   const { db, bucket, url } = await setup(t, undefined, undefined, async (input) => {
@@ -518,8 +500,6 @@ test("saves each submission and retrieves its linked analysis with a minimal res
   assert.equal(details.category, "Formal");
   assert.equal(details.favourite, false);
   assert.equal(details.status, "uploaded");
-  assert.equal(details.Inspiration, true);
-  assert.equal(details.style, "uploaded");
   assert.ok(details.createdAt instanceof Date);
   const analysisPath = [...db.records.keys()].find((key) =>
     key.startsWith("fitcheck_outfit_analysis/") &&
