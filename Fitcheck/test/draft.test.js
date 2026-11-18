@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createApp } = require("../app");
 const { createOutfitStore } = require("../services/outfits");
-const { createAnalyzer } = require("../services/gemini");
+const { createAnalyzer, createStyleMentor } = require("../services/gemini");
 const https = require("node:https");
 const { EventEmitter } = require("node:events");
 const { Readable } = require("node:stream");
@@ -33,7 +33,7 @@ function fakeFirestore() {
     id: ref.path.split("/").pop(), ref, exists: records.has(ref.path), data: () => records.get(ref.path),
   });
   const ref = (path) => ({ path, get: async () => snapshot({ path }) });
-  const query = (name, field, value, max = 2) => ({
+  const query = (name, field, value, max = Infinity) => ({
     limit: (n) => query(name, field, value, n),
     get: async () => {
       const docs = [...records.entries()].filter(([path, data]) =>
@@ -113,7 +113,7 @@ function fakeBucket() {
 async function setup(t, analyze = async () => analysis, fetchMedia = async (_url, label) => ({
   buffer: label === "Image" ? png : wav,
   mimeType: label === "Image" ? "image/png" : "audio/wav",
-})) {
+}), styleMentor = async () => ({ tips: ["Try a jacket."] })) {
   const db = fakeFirestore();
   const bucket = fakeBucket();
   const auth = {
@@ -122,7 +122,7 @@ async function setup(t, analyze = async () => analysis, fetchMedia = async (_url
       return { uid: token };
     },
   };
-  const server = createApp({ auth, analyze, fetchMedia, store: createOutfitStore(db, bucket) }).listen(0, "127.0.0.1");
+  const server = createApp({ auth, analyze, fetchMedia, styleMentor, store: createOutfitStore(db, bucket) }).listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
   return { db, bucket, url: `http://127.0.0.1:${server.address().port}/api` };
@@ -145,6 +145,82 @@ function get(url, outfitId, token = "alice", userId = token) {
     headers: { Authorization: `Bearer ${token}` },
   });
 }
+
+test("lists only the user's uploaded fits, including legacy records without filter fields", async (t) => {
+  const { db, url } = await setup(t);
+  const upload = await (await post(url, payload())).json();
+  const prefix = "fitcheck_outfit_details/";
+  db.records.set(`${prefix}legacy`, { userId: "alice", status: "uploaded", outfitName: "Legacy" });
+  db.records.set(`${prefix}excluded`, { userId: "alice", status: "uploaded", Inspiration: false, style: "uploaded" });
+  db.records.set(`${prefix}other-style`, { userId: "alice", status: "uploaded", Inspiration: true, style: "saved" });
+  db.records.set(`${prefix}pending`, { userId: "alice", status: "pending", Inspiration: true, style: "uploaded" });
+  db.records.set(`${prefix}other-user`, { userId: "bob", status: "uploaded", Inspiration: true, style: "uploaded" });
+  assert.equal((await fetch(`${url}/outfits`)).status, 401);
+  const response = await fetch(`${url}/outfits`, { headers: { Authorization: "Bearer alice" } });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "private, no-store");
+  const { outfits } = await response.json();
+  assert.deepEqual(outfits.map((item) => item.outfitId).sort(), [upload.outfitId, "legacy"].sort());
+  assert.equal(outfits.find((item) => item.outfitId === upload.outfitId).photoUrl, `/api/outfits/${upload.outfitId}/photo`);
+});
+
+test("generates style tips for an owned photo without saving results", async (t) => {
+  let context;
+  const { db, bucket, url } = await setup(t, undefined, undefined, async (input) => {
+    context = input;
+    return { tips: ["Try a neutral jacket."] };
+  });
+  const { outfitId } = await (await post(url, payload())).json();
+  const records = [...db.records.entries()];
+  const files = [...bucket.files.entries()];
+  const path = `${url}/outfits/${outfitId}/style-tips`;
+  assert.equal((await fetch(path)).status, 401);
+  assert.equal((await fetch(`${url}/outfits/__bad__/style-tips`, {
+    headers: { Authorization: "Bearer alice" },
+  })).status, 400);
+  assert.equal((await fetch(path, { headers: { Authorization: "Bearer bob" } })).status, 404);
+  const response = await fetch(path, { headers: { Authorization: "Bearer alice" } });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "private, no-store");
+  assert.deepEqual(await response.json(), { outfitId, tips: ["Try a neutral jacket."] });
+  assert.deepEqual(context, {
+    image: png, mimeType: "image/png", userId: "alice",
+    outfitName: "Weekend", occasion: "Party", category: "Casual",
+  });
+  assert.deepEqual([...db.records.entries()], records);
+  assert.deepEqual([...bucket.files.entries()], files);
+  bucket.files.clear();
+  assert.equal((await fetch(path, { headers: { Authorization: "Bearer alice" } })).status, 404);
+});
+
+test("style tips report a model failure without saving feedback", async (t) => {
+  const { db, url } = await setup(t, undefined, undefined, async () => { throw new Error("AI unavailable"); });
+  const { outfitId } = await (await post(url, payload())).json();
+  const records = [...db.records.entries()];
+  const response = await fetch(`${url}/outfits/${outfitId}/style-tips`, {
+    headers: { Authorization: "Bearer alice" },
+  });
+  assert.equal(response.status, 500);
+  assert.deepEqual(await response.json(), { error: "Internal server error" });
+  assert.deepEqual([...db.records.entries()], records);
+});
+
+test("style mentor sends image and context to Gemini and validates its response through ADK", async () => {
+  let request;
+  const client = {
+    models: { generateContent: async (input) => { request = input; return { text: '{"tips":["  Try a blue jacket.  "]}' }; } },
+  };
+  const mentor = createStyleMentor("fake", "unused", client);
+  assert.deepEqual(await mentor({
+    image: png, mimeType: "image/png", userId: "alice",
+    outfitName: "Look", occasion: "Work", category: "Casual",
+  }), { tips: ["Try a blue jacket."] });
+  assert.match(request.config.systemInstruction, /untrusted data/);
+  assert.match(request.contents[0].parts[0].text, /"occasion":"Work"/);
+  assert.equal(request.contents[0].parts[1].inlineData.data, png.toString("base64"));
+  client.models.generateContent = async () => ({ text: '{"tips":[]}' });
+  await assert.rejects(mentor({ image: png, mimeType: "image/png", userId: "alice" }), /ADK feedback validation failed/);
+});
 
 test("saves each submission and retrieves its linked analysis with a minimal response", async (t) => {
   let context;
@@ -178,6 +254,8 @@ test("saves each submission and retrieves its linked analysis with a minimal res
   assert.equal(details.occasion, "Date Night");
   assert.equal(details.category, "Formal");
   assert.equal(details.status, "uploaded");
+  assert.equal(details.Inspiration, true);
+  assert.equal(details.style, "uploaded");
   assert.ok(details.createdAt instanceof Date);
   const analysisPath = [...db.records.keys()].find((key) =>
     key.startsWith("fitcheck_outfit_analysis/") &&

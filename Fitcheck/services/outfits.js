@@ -42,6 +42,28 @@ function createOutfitStore(db, bucket) {
   }
 
   return {
+    async listOutfits({ userId }) {
+      const snapshot = await db.collection(COLLECTIONS.details).where("userId", "==", userId).get();
+      return snapshot.docs.flatMap((record) => {
+        const outfit = record.data();
+        if (outfit.status !== "uploaded" ||
+            (outfit.Inspiration !== undefined && outfit.Inspiration !== true) ||
+            (outfit.style !== undefined && outfit.style !== "uploaded")) return [];
+        return [{
+          outfitId: record.id,
+          outfitName: outfit.outfitName,
+          occasion: outfit.occasion,
+          category: outfit.category,
+          status: outfit.status,
+          photoUrl: photoEndpointUrl(record.id),
+        }];
+      });
+    },
+
+    async getOutfit({ outfitId, userId }) {
+      return ownedOutfit(outfitId, userId);
+    },
+
     async getAnalysis({ outfitId, userId }) {
       const outfit = await ownedOutfit(outfitId, userId);
       if (outfit.status === "pending" || outfit.status === "failed") {
@@ -142,7 +164,8 @@ function createOutfitStore(db, bucket) {
         const now = new Date();
         const batch = db.batch();
         batch.create(db.collection(COLLECTIONS.details).doc(outfitId), {
-          outfitId, userId, outfitName, occasion, category, createdAt: now, status: "pending",
+          outfitId, userId, outfitName, occasion, category, Inspiration: true, style: "uploaded",
+          createdAt: now, status: "pending",
         });
         batch.create(db.collection(COLLECTIONS.media).doc(mediaId), {
           mediaId, outfitId, type: "photo", uploadedAt: now,

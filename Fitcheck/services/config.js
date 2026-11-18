@@ -2,7 +2,7 @@ const { initializeApp, applicationDefault } = require("firebase-admin/app");
 const { getAuth } = require("firebase-admin/auth");
 const { getFirestore } = require("firebase-admin/firestore");
 const { getStorage } = require("firebase-admin/storage");
-const { createAnalyzer } = require("./gemini");
+const { createAnalyzer, createStyleMentor } = require("./gemini");
 const { createOutfitStore } = require("./outfits");
 
 function createDependencies(env) {
@@ -20,6 +20,7 @@ function createDependencies(env) {
   return {
     auth: getAuth(app),
     analyze: createAnalyzer(env.GEMINI_MODEL, env.GEMINI_API_KEY),
+    styleMentor: createStyleMentor(env.GEMINI_MODEL, env.GEMINI_API_KEY),
     store: createOutfitStore(getFirestore(app), getStorage(app).bucket()),
   };
 }
