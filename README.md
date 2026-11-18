@@ -154,7 +154,7 @@ Example response:
 Scores are averaged only over valid saved scores and rounded to two decimal
 places. `averageFitScore` is the average of the available style-criteria
 averages; it is `null` if there are no valid criterion scores.
-Saved inspirations are the signed-in user's outfit records whose `inspiration`
+Saved inspirations are the signed-in user's outfit records whose `favourite`
 field is exactly `true`.
 
 ### List the signed-in user's outfits
@@ -187,35 +187,35 @@ Example response:
 }
 ```
 
-### List saved inspirations
+### List favourites
 
-`GET /api/getInspirationList` requires a Firebase ID token and returns the same
+`GET /api/getFavouriteList` requires a Firebase ID token and returns the same
 outfit fields as `/api/getMyFitList`, limited to the signed-in user's outfit
-records whose `inspiration` field is exactly `true`.
+records whose `favourite` field is exactly `true`.
 
 ```sh
-curl "$BASE_URL/api/getInspirationList" \
+curl "$BASE_URL/api/getFavouriteList" \
   -H "Authorization: Bearer $FIREBASE_ID_TOKEN"
 ```
 
 The response uses the same `{ "outfits": [...] }` shape as `/getMyFitList`;
-it returns an empty array when the user has no saved inspirations.
+it returns an empty array when the user has no favourites.
 
-### Save an outfit as inspiration
+### Save an outfit as a favourite
 
-`PATCH /api/saveInspiration` requires a Firebase ID token and a JSON body
+`PUT /api/saveFavourites` requires a Firebase ID token and a JSON body
 containing only the outfit ID. The backend verifies that the outfit belongs to
-the signed-in user before setting `inspiration` to `true`. Repeating the
+the signed-in user before setting `favourite` to `true`. Repeating the
 request is safe and leaves the field set to `true`.
 
 ```sh
-curl -X PATCH "$BASE_URL/api/saveInspiration" \
+curl -X PUT "$BASE_URL/api/saveFavourites" \
   -H "Authorization: Bearer $FIREBASE_ID_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"outfitId":"OUTFIT_ID"}'
 ```
 
-Success returns `200` with `{"success":true,"outfitId":"...","inspiration":true}`.
+Success returns `200` with `{"success":true,"outfitId":"...","favourite":true}`.
 Invalid input returns `400`; a missing, nonexistent, or another user's outfit
 returns `404`.
 
@@ -242,7 +242,7 @@ allowed; if unset the existing wildcard behavior remains.
 Each completed upload has one linked record in each collection:
 
 - `fitcheck_outfit_details`: `outfitId`, `userId`, `outfitName`, `occasion`,
-  `category`, `inspiration` (boolean, defaults to `false`), `createdAt` (Timestamp),
+  `category`, `favourite` (boolean, defaults to `false`), `createdAt` (Timestamp),
   `status` (`pending`, `uploaded`, or `failed`).
 - `fitcheck_outfit_media`: `mediaId`, `outfitId`, `type` (`photo`),
   `PhotoStoragePath`, `PhotoUrl`, `AudioStoragePath`, `AudioUrl` (empty when no
@@ -256,11 +256,14 @@ Each completed upload has one linked record in each collection:
   `color_harmony_score`, `style_matching_score`, `balance_layering_score`,
   `accessories_score` (each 0-100), `created_at`.
 
+Existing outfit documents that contain the old `inspiration` field must be
+migrated to `favourite` to preserve their saved status.
+
 Successful GET requests return the four records:
 
 ```json
 {
-  "outfit": { "outfitId": "uuid", "userId": "firebase-uid", "outfitName": "Summer Casual", "occasion": "Party", "category": "Casual", "inspiration": false, "status": "uploaded", "analysis": { "summary": "...", "strengths": ["..."], "suggestions": ["..."], "colorPalette": ["blue"] } },
+  "outfit": { "outfitId": "uuid", "userId": "firebase-uid", "outfitName": "Summer Casual", "occasion": "Party", "category": "Casual", "favourite": false, "status": "uploaded", "analysis": { "summary": "...", "strengths": ["..."], "suggestions": ["..."], "colorPalette": ["blue"] } },
   "media": { "mediaId": "uuid", "outfitId": "uuid", "type": "photo", "PhotoStoragePath": "outfits/uuid/photos/front.jpg", "PhotoUrl": "/api/outfits/uuid/photo", "AudioStoragePath": "", "AudioUrl": "" },
   "analysis": { "analysis_id": "uuid", "outfit_id": "uuid", "user_id": "firebase-uid", "style_category": "Casual", "outfit_title": "The everyday edit", "overall_score": 82, "summary": "...", "color_description": "...", "primary_colors": ["blue"], "strengths": ["..."], "next_direction": "..." },
   "scores": { "score_id": "uuid", "analysis_id": "uuid", "color_harmony_score": 90, "style_matching_score": 80, "balance_layering_score": 75, "accessories_score": 60 }
