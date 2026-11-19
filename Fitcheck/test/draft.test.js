@@ -33,13 +33,30 @@ function fakeFirestore() {
     id: ref.path.split("/").pop(), ref, exists: records.has(ref.path), data: () => records.get(ref.path),
   });
   const ref = (path) => ({ path, get: async () => snapshot({ path }) });
-  const query = (name, field, operator, value, max = Infinity) => ({
-    limit: (n) => query(name, field, operator, value, n),
+  const query = (name, filters = [], max = Infinity, start = 0) => ({
+    where: (field, operator, value) =>
+      query(name, [...filters, { field, operator, value }], max, start),
+    limit: (n) => query(name, filters, n, start),
+    offset: (n) => query(name, filters, max, n),
+    count: () => ({
+      get: async () => ({
+        data: () => ({
+          count: [...records.entries()].filter(([path, data]) =>
+            path.startsWith(`${name}/`) &&
+            filters.every(({ field, operator, value }) =>
+              operator === "==" ? data[field] === value : value.includes(data[field])
+            )
+          ).length,
+        }),
+      }),
+    }),
     get: async () => {
       const docs = [...records.entries()].filter(([path, data]) =>
         path.startsWith(`${name}/`) &&
-        (operator === "==" ? data[field] === value : value.includes(data[field]))
-      ).slice(0, max).map(([path]) => snapshot(ref(path)));
+        filters.every(({ field, operator, value }) =>
+          operator === "==" ? data[field] === value : value.includes(data[field])
+        )
+      ).slice(start, start + max).map(([path]) => snapshot(ref(path)));
       return { docs, size: docs.length, empty: docs.length === 0 };
     },
   });
@@ -66,7 +83,7 @@ function fakeFirestore() {
       doc: (id) => ref(`${name}/${id}`),
       where: (field, operator, value) => {
         assert.ok(["==", "in"].includes(operator));
-        return query(name, field, operator, value);
+        return query(name).where(field, operator, value);
       },
     }),
     batch: () => {
@@ -371,8 +388,63 @@ test("getMyFitList returns only the authenticated user's outfit details, photos,
         averageOutfitScore: null,
       },
     ],
+    pagination: {
+      page: 1,
+      pageSize: 20,
+      totalOutfits: 2,
+      totalPages: 1,
+      hasNextPage: false,
+      hasPreviousPage: false,
+    },
   });
+  assert.equal((await fetch(`${url}/getMyFitList?page=0`, {
+    headers: { Authorization: "Bearer alice" },
+  })).status, 400);
+  assert.equal((await fetch(`${url}/getMyFitList?page=1.5`, {
+    headers: { Authorization: "Bearer alice" },
+  })).status, 400);
   assert.equal((await fetch(`${url}/getMyFitList`)).status, 401);
+});
+
+test("getMyFitList paginates 45 outfits in pages of 20", async (t) => {
+  const { db, url } = await setup(t);
+  for (let index = 0; index < 45; index += 1) {
+    const outfitId = `outfit-${String(index).padStart(2, "0")}`;
+    db.records.set(`fitcheck_outfit_details/${outfitId}`, {
+      userId: "alice",
+      outfitName: outfitId,
+      status: "uploaded",
+    });
+  }
+
+  const fetchPage = async (page) => {
+    const response = await fetch(`${url}/getMyFitList?page=${page}`, {
+      headers: { Authorization: "Bearer alice" },
+    });
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  const first = await fetchPage(1);
+  const second = await fetchPage(2);
+  const third = await fetchPage(3);
+
+  assert.equal(first.outfits.length, 20);
+  assert.equal(second.outfits.length, 20);
+  assert.equal(third.outfits.length, 5);
+  assert.deepEqual(first.pagination, {
+    page: 1, pageSize: 20, totalOutfits: 45, totalPages: 3,
+    hasNextPage: true, hasPreviousPage: false,
+  });
+  assert.deepEqual(second.pagination, {
+    page: 2, pageSize: 20, totalOutfits: 45, totalPages: 3,
+    hasNextPage: true, hasPreviousPage: true,
+  });
+  assert.deepEqual(third.pagination, {
+    page: 3, pageSize: 20, totalOutfits: 45, totalPages: 3,
+    hasNextPage: false, hasPreviousPage: true,
+  });
+  assert.equal(new Set([...first.outfits, ...second.outfits, ...third.outfits]
+    .map((outfit) => outfit.outfitId)).size, 45);
 });
 
 test("getFavouriteList returns only the authenticated user's outfits marked favourite", async (t) => {
@@ -395,7 +467,8 @@ test("getFavouriteList returns only the authenticated user's outfits marked favo
       status: "uploaded", favourite: true,
     }],
     ["fitcheck_outfit_media/media-alice-saved", {
-      outfitId: "alice-saved", PhotoUrl: "https://storage.example/alice-saved.jpg",
+      outfitId: "alice-saved",
+      PhotoUrl: "https://firebasestorage.googleapis.com/v0/b/private-bucket/o/outfits%2Falice-saved%2Fphotos%2Ffront.jpg?alt=media",
     }],
     ["fitcheck_outfit_media/media-alice-pending", {
       outfitId: "alice-pending-saved", PhotoUrl: "https://storage.example/alice-pending.jpg",
@@ -423,7 +496,7 @@ test("getFavouriteList returns only the authenticated user's outfits marked favo
         category: "Formal",
         occasion: "Dinner",
         outfitName: "Saved look",
-        photoUrl: "https://storage.example/alice-saved.jpg",
+        photoUrl: "https://signed.example/outfits%2Falice-saved%2Fphotos%2Ffront.jpg?signature=test",
         averageOutfitScore: 91,
       },
       {
@@ -435,8 +508,64 @@ test("getFavouriteList returns only the authenticated user's outfits marked favo
         averageOutfitScore: null,
       },
     ],
+    pagination: {
+      page: 1,
+      pageSize: 20,
+      totalOutfits: 2,
+      totalPages: 1,
+      hasNextPage: false,
+      hasPreviousPage: false,
+    },
   });
+  assert.equal((await fetch(`${url}/getFavouriteList?page=0`, {
+    headers: { Authorization: "Bearer alice" },
+  })).status, 400);
   assert.equal((await fetch(`${url}/getFavouriteList`)).status, 401);
+});
+
+test("getFavouriteList paginates favourites only", async (t) => {
+  const { db, url } = await setup(t);
+  for (let index = 0; index < 45; index += 1) {
+    db.records.set(`fitcheck_outfit_details/favourite-${String(index).padStart(2, "0")}`, {
+      userId: "alice",
+      favourite: true,
+    });
+  }
+  for (let index = 0; index < 7; index += 1) {
+    db.records.set(`fitcheck_outfit_details/not-favourite-${index}`, {
+      userId: "alice",
+      favourite: false,
+    });
+  }
+
+  const fetchPage = async (page) => {
+    const response = await fetch(`${url}/getFavouriteList?page=${page}`, {
+      headers: { Authorization: "Bearer alice" },
+    });
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  const first = await fetchPage(1);
+  const second = await fetchPage(2);
+  const third = await fetchPage(3);
+
+  assert.equal(first.outfits.length, 20);
+  assert.equal(second.outfits.length, 20);
+  assert.equal(third.outfits.length, 5);
+  assert.deepEqual(first.pagination, {
+    page: 1, pageSize: 20, totalOutfits: 45, totalPages: 3,
+    hasNextPage: true, hasPreviousPage: false,
+  });
+  assert.deepEqual(second.pagination, {
+    page: 2, pageSize: 20, totalOutfits: 45, totalPages: 3,
+    hasNextPage: true, hasPreviousPage: true,
+  });
+  assert.deepEqual(third.pagination, {
+    page: 3, pageSize: 20, totalOutfits: 45, totalPages: 3,
+    hasNextPage: false, hasPreviousPage: true,
+  });
+  assert.ok([...first.outfits, ...second.outfits, ...third.outfits]
+    .every((outfit) => outfit.outfitId.startsWith("favourite-")));
 });
 
 test("saveFavourites updates only an authenticated owner's outfit and is idempotent", async (t) => {

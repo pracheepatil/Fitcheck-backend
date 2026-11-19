@@ -10,6 +10,7 @@ const IMAGE_EXTENSIONS = { "image/jpeg": "jpg", "image/png": "png", "image/webp"
 const AUDIO_EXTENSIONS = { "audio/mpeg": "mp3", "audio/wav": "wav", "audio/x-wav": "wav", "audio/mp4": "m4a", "audio/x-m4a": "m4a", "audio/webm": "webm" };
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const PHOTO_URL_TTL_MS = 15 * 60 * 1000;
+const FIT_LIST_PAGE_SIZE = 20;
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const FIRESTORE_IN_QUERY_LIMIT = 30;
 const SCORE_FIELDS = {
@@ -29,6 +30,22 @@ function createOutfitStore(db, bucket) {
     `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(path)}?alt=media`;
   const photoEndpointUrl = (outfitId) =>
     `/api/outfits/${encodeURIComponent(outfitId)}/photo`;
+
+  function photoStoragePath(media) {
+    if (media.PhotoStoragePath) return media.PhotoStoragePath;
+    if (!media.PhotoUrl) return "";
+    try {
+      const photoUrl = new URL(media.PhotoUrl);
+      const objectPrefix = `/v0/b/${bucket.name}/o/`;
+      if (photoUrl.hostname !== "firebasestorage.googleapis.com" ||
+          !photoUrl.pathname.startsWith(objectPrefix)) {
+        return "";
+      }
+      return decodeURIComponent(photoUrl.pathname.slice(objectPrefix.length));
+    } catch {
+      return "";
+    }
+  }
 
   async function oneRecord(query, missingError) {
     const snapshot = await query.limit(2).get();
@@ -57,13 +74,33 @@ function createOutfitStore(db, bucket) {
     return Math.round((validValues.reduce((sum, value) => sum + value, 0) / validValues.length) * 100) / 100;
   }
 
-  async function getUserFitList(userId, favouritesOnly = false, signedPhotoUrls = false) {
-    const outfitsSnapshot = await db.collection(COLLECTIONS.details)
-      .where("userId", "==", userId)
-      .get();
+  async function getUserFitList(userId, favouritesOnly = false, signedPhotoUrls = false, page = null) {
+    let outfitsQuery = db.collection(COLLECTIONS.details).where("userId", "==", userId);
+    if (favouritesOnly) outfitsQuery = outfitsQuery.where("favourite", "==", true);
+    let pagination = null;
+    let outfitsSnapshot;
+    if (page !== null) {
+      const countQuery = outfitsQuery.count();
+      const [countSnapshot, pageSnapshot] = await Promise.all([
+        countQuery.get(),
+        outfitsQuery.offset((page - 1) * FIT_LIST_PAGE_SIZE).limit(FIT_LIST_PAGE_SIZE).get(),
+      ]);
+      const totalOutfits = countSnapshot.data().count;
+      const totalPages = Math.ceil(totalOutfits / FIT_LIST_PAGE_SIZE);
+      outfitsSnapshot = pageSnapshot;
+      pagination = {
+        page,
+        pageSize: FIT_LIST_PAGE_SIZE,
+        totalOutfits,
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPreviousPage: page > 1 && totalPages > 0,
+      };
+    } else {
+      outfitsSnapshot = await outfitsQuery.get();
+    }
     const outfits = outfitsSnapshot.docs
-      .map((record) => ({ ...record.data(), outfitId: record.id }))
-      .filter((outfit) => !favouritesOnly || outfit.favourite === true);
+      .map((record) => ({ ...record.data(), outfitId: record.id }));
     const outfitIds = outfits.map((outfit) => outfit.outfitId);
     const mediaRecords = [];
     const analysisRecords = [];
@@ -87,16 +124,17 @@ function createOutfitStore(db, bucket) {
         .map((record) => [record.outfit_id, record])
     );
 
-    return Promise.all(outfits.map(async (outfit) => {
+    const listedOutfits = await Promise.all(outfits.map(async (outfit) => {
       const media = mediaByOutfitId.get(outfit.outfitId);
       const analysis = analysisByOutfitId.get(outfit.outfitId);
       let photoUrl = media?.PhotoUrl ?? "";
-      if (signedPhotoUrls && media?.PhotoStoragePath) {
+      const storagePath = media ? photoStoragePath(media) : "";
+      if (signedPhotoUrls && storagePath) {
         const expectedPrefix = `outfits/${outfit.outfitId}/`;
-        if (!media.PhotoStoragePath.startsWith(expectedPrefix)) {
+        if (!storagePath.startsWith(expectedPrefix)) {
           throw new OutfitDataConflictError();
         }
-        const [signedUrl] = await bucket.file(media.PhotoStoragePath).getSignedUrl({
+        const [signedUrl] = await bucket.file(storagePath).getSignedUrl({
           action: "read",
           expires: Date.now() + PHOTO_URL_TTL_MS,
         });
@@ -113,6 +151,7 @@ function createOutfitStore(db, bucket) {
           : null,
       };
     }));
+    return pagination ? { outfits: listedOutfits, pagination } : listedOutfits;
   }
 
   return {
@@ -179,12 +218,12 @@ function createOutfitStore(db, bucket) {
       };
     },
 
-    async getMyFitList({ userId }) {
-      return getUserFitList(userId, false, true);
+    async getMyFitList({ userId, page = 1 }) {
+      return getUserFitList(userId, false, true, page);
     },
 
-    async getFavouriteList({ userId }) {
-      return getUserFitList(userId, true);
+    async getFavouriteList({ userId, page = 1 }) {
+      return getUserFitList(userId, true, true, page);
     },
 
     async getAnalysis({ outfitId, userId }) {

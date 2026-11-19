@@ -182,9 +182,12 @@ outfit name, photo URL, and the analysis `overall_score` as
 For stored private photos, `photoUrl` is a signed Storage URL that can be used
 directly as an image source and expires after 15 minutes. Legacy media without
 a Storage path returns its stored `PhotoUrl`.
+The endpoint returns 20 outfits per page by default. Pass a one-based `page`
+query parameter to retrieve another page; the response includes pagination
+metadata.
 
 ```sh
-curl "$BASE_URL/api/getMyFitList" \
+curl "$BASE_URL/api/getMyFitList?page=2" \
   -H "Authorization: Bearer $FIREBASE_ID_TOKEN"
 ```
 
@@ -201,7 +204,15 @@ Example response:
       "photoUrl": "https://storage.googleapis.com/...",
       "averageOutfitScore": 86
     }
-  ]
+  ],
+  "pagination": {
+    "page": 2,
+    "pageSize": 20,
+    "totalOutfits": 21,
+    "totalPages": 2,
+    "hasNextPage": false,
+    "hasPreviousPage": true
+  }
 }
 ```
 
@@ -210,13 +221,17 @@ Example response:
 `GET /api/getFavouriteList` requires a Firebase ID token and returns the same
 outfit fields as `/api/getMyFitList`, limited to the signed-in user's outfit
 records whose `favourite` field is exactly `true`.
+Photo URLs for stored private photos are signed and expire after 15 minutes,
+just like the URLs returned by `/api/getMyFitList`; legacy media without a
+Storage path uses its stored `PhotoUrl`. This endpoint returns 20 favourites
+per page by default and accepts the same one-based `page` query parameter.
 
 ```sh
-curl "$BASE_URL/api/getFavouriteList" \
+curl "$BASE_URL/api/getFavouriteList?page=1" \
   -H "Authorization: Bearer $FIREBASE_ID_TOKEN"
 ```
 
-The response uses the same `{ "outfits": [...] }` shape as `/getMyFitList`;
+The response uses the same outfits and pagination shape as `/getMyFitList`;
 it returns an empty array when the user has no favourites.
 
 ### Save an outfit as a favourite
