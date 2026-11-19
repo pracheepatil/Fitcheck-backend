@@ -8,7 +8,7 @@ const { createFavouriteListController } = require("../controllers/favouriteListC
 function createFitcheckRouter(dependencies) {
   const router = express.Router();
   const { sendMessageController } = require("../controllers/messageController");
-  const { analyzeOutfit, getAnalysis, getPhoto, getMyFits, getStyleTips } = createAnalyzeController(dependencies);
+  const { analyzeOutfit, getAnalysis, getPhoto, getStyleTips } = createAnalyzeController(dependencies);
   const getAverageAnalysis = createAverageAnalysisController(dependencies);
   const saveFavourites = createSaveFavouritesController(dependencies);
   const getMyFitList = createMyFitListController(dependencies);
@@ -22,7 +22,6 @@ function createFitcheckRouter(dependencies) {
   router.post("/analyze", analyzeOutfit);
   router.get("/getOutfitAnalysis", getAnalysis);
   router.get("/outfits/:outfitId/photo", getPhoto);
-  router.get("/outfits", getMyFits);
   router.get("/outfits/:outfitId/style-tips", getStyleTips);
 
   return router;

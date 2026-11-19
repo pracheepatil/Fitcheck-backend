@@ -103,15 +103,6 @@ function createAnalyzeController(dependencies) {
     }
   }
 
-  async function getMyFits(req, res, next) {
-    try {
-      const outfits = await dependencies.store.listOutfits({ userId: req.user.uid });
-      return res.set("Cache-Control", "private, no-store").json({ outfits });
-    } catch (error) {
-      return mapAnalyzeError(error, res, next);
-    }
-  }
-
   async function getStyleTips(req, res, next) {
     const outfitId = req.params.outfitId;
     if (!validOutfitId(outfitId)) return res.status(400).json({ error: "Provide a valid outfitId" });
@@ -133,7 +124,6 @@ function createAnalyzeController(dependencies) {
     analyzeOutfit: [requireAuthentication(dependencies.auth), parseJson, analyzeOutfit],
     getAnalysis: [requireAuthentication(dependencies.auth), validateIdentity, getAnalysis],
     getPhoto: [requireAuthentication(dependencies.auth), getPhoto],
-    getMyFits: [requireAuthentication(dependencies.auth), getMyFits],
     getStyleTips: [requireAuthentication(dependencies.auth), getStyleTips],
   };
 }
