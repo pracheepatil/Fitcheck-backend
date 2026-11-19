@@ -108,6 +108,11 @@ function fakeBucket() {
         if (!files.has(name)) throw Object.assign(new Error("not found"), { code: 404 });
         return [files.get(name)];
       },
+      getSignedUrl: async ({ action, expires }) => {
+        assert.equal(action, "read");
+        assert.ok(expires > Date.now());
+        return [`https://signed.example/${encodeURIComponent(name)}?signature=test`];
+      },
     }),
   };
 }
@@ -372,7 +377,7 @@ test("getMyFitList returns only the authenticated user's outfit details, photos,
         category: "Casual",
         occasion: "Brunch",
         outfitName: "Weekend look",
-        photoUrl: "https://storage.example/photo.jpg",
+        photoUrl: "https://signed.example/outfits%2Falice-outfit-1%2Fphotos%2Ffront.jpg?signature=test",
         averageOutfitScore: 86,
       },
       {

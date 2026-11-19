@@ -9,6 +9,7 @@ const COLLECTIONS = {
 const IMAGE_EXTENSIONS = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
 const AUDIO_EXTENSIONS = { "audio/mpeg": "mp3", "audio/wav": "wav", "audio/x-wav": "wav", "audio/mp4": "m4a", "audio/x-m4a": "m4a", "audio/webm": "webm" };
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const PHOTO_URL_TTL_MS = 15 * 60 * 1000;
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const FIRESTORE_IN_QUERY_LIMIT = 30;
 const SCORE_FIELDS = {
@@ -56,13 +57,13 @@ function createOutfitStore(db, bucket) {
     return Math.round((validValues.reduce((sum, value) => sum + value, 0) / validValues.length) * 100) / 100;
   }
 
-  async function getUserFitList(userId, inspirationsOnly = false) {
+  async function getUserFitList(userId, favouritesOnly = false, signedPhotoUrls = false) {
     const outfitsSnapshot = await db.collection(COLLECTIONS.details)
       .where("userId", "==", userId)
       .get();
     const outfits = outfitsSnapshot.docs
       .map((record) => ({ ...record.data(), outfitId: record.id }))
-      .filter((outfit) => !inspirationsOnly || outfit.favourite === true);
+      .filter((outfit) => !favouritesOnly || outfit.favourite === true);
     const outfitIds = outfits.map((outfit) => outfit.outfitId);
     const mediaRecords = [];
     const analysisRecords = [];
@@ -86,20 +87,32 @@ function createOutfitStore(db, bucket) {
         .map((record) => [record.outfit_id, record])
     );
 
-    return outfits.map((outfit) => {
+    return Promise.all(outfits.map(async (outfit) => {
       const media = mediaByOutfitId.get(outfit.outfitId);
       const analysis = analysisByOutfitId.get(outfit.outfitId);
+      let photoUrl = media?.PhotoUrl ?? "";
+      if (signedPhotoUrls && media?.PhotoStoragePath) {
+        const expectedPrefix = `outfits/${outfit.outfitId}/`;
+        if (!media.PhotoStoragePath.startsWith(expectedPrefix)) {
+          throw new OutfitDataConflictError();
+        }
+        const [signedUrl] = await bucket.file(media.PhotoStoragePath).getSignedUrl({
+          action: "read",
+          expires: Date.now() + PHOTO_URL_TTL_MS,
+        });
+        photoUrl = signedUrl;
+      }
       return {
         outfitId: outfit.outfitId,
         category: outfit.category ?? "",
         occasion: outfit.occasion ?? "",
         outfitName: outfit.outfitName ?? "",
-        photoUrl: media?.PhotoUrl ?? "",
+        photoUrl,
         averageOutfitScore: typeof analysis?.overall_score === "number"
           ? analysis.overall_score
           : null,
       };
-    });
+    }));
   }
 
   return {
@@ -163,7 +176,7 @@ function createOutfitStore(db, bucket) {
     },
 
     async getMyFitList({ userId }) {
-      return getUserFitList(userId);
+      return getUserFitList(userId, false, true);
     },
 
     async getFavouriteList({ userId }) {

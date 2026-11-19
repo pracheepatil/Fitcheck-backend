@@ -187,7 +187,9 @@ field is exactly `true`.
 belonging to that token's user ID. Each item includes its category, occasion,
 outfit name, photo URL, and the analysis `overall_score` as
 `averageOutfitScore`. The score is `null` until analysis is available.
-`photoUrl` is returned directly from the media record's stored `PhotoUrl`.
+For stored private photos, `photoUrl` is a signed Storage URL that can be used
+directly as an image source and expires after 15 minutes. Legacy media without
+a Storage path returns its stored `PhotoUrl`.
 
 ```sh
 curl "$BASE_URL/api/getMyFitList" \
@@ -204,7 +206,7 @@ Example response:
       "category": "Casual",
       "occasion": "Brunch",
       "outfitName": "Weekend look",
-      "photoUrl": "/api/outfits/outfit-uuid/photo",
+      "photoUrl": "https://storage.googleapis.com/...",
       "averageOutfitScore": 86
     }
   ]
