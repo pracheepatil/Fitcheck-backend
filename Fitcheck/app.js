@@ -15,7 +15,7 @@ function createApp(dependencies, { apiRoutes = [], allowedOrigins = [] } = {}) {
       res.set("Access-Control-Allow-Origin", "*");
     }
     if (req.method === "OPTIONS") {
-      res.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+      res.set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
       res.set("Access-Control-Allow-Headers", "Authorization, Content-Type");
       return res.sendStatus(204);
     }
@@ -44,6 +44,7 @@ if (require.main === module) {
     const dependencies = createDependencies(process.env);
     const apiRoutes = [
       ["/api/auth", require("./routes/authRoutes")],
+      ["/api/profile", require("./routes/profileRoutes")],
       ["/api", require("./routes/firebaseTestRoutes")],
     ];
     const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || "").split(",").map((origin) => origin.trim()).filter(Boolean);
