@@ -587,7 +587,8 @@ test("saveFavourites updates only an authenticated owner's outfit and is idempot
   assert.equal((await request({ outfitId }, "bob")).status, 404);
   assert.equal(db.records.get(detailsPath).favourite, false);
   assert.equal((await request({ outfitId: " " })).status, 400);
-  assert.equal((await request({ outfitId, favourite: true })).status, 400);
+  assert.equal((await request({ outfitId, favourite: "true" })).status, 400);
+  assert.equal((await request({ outfitId, unexpected: true })).status, 400);
 
   const saved = await request({ outfitId });
   assert.equal(saved.status, 200);
@@ -598,6 +599,12 @@ test("saveFavourites updates only an authenticated owner's outfit and is idempot
   assert.equal(repeatedSave.status, 200);
   assert.equal(db.records.get(detailsPath).favourite, true);
   assert.equal((await (await get(url, outfitId)).json()).outfit.favourite, true);
+
+  const unsaved = await request({ outfitId, favourite: false });
+  assert.equal(unsaved.status, 200);
+  assert.deepEqual(await unsaved.json(), { success: true, outfitId, favourite: false });
+  assert.equal(db.records.get(detailsPath).favourite, false);
+  assert.equal((await (await get(url, outfitId)).json()).outfit.favourite, false);
 });
 
 test("saves each submission and retrieves its linked analysis with a minimal response", async (t) => {

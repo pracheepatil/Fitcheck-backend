@@ -11,8 +11,9 @@ function createSaveFavouritesController(dependencies) {
   async function saveFavourites(req, res, next) {
     const body = req.body;
     if (!body || typeof body !== "object" || Array.isArray(body) ||
-        Object.keys(body).length !== 1 || !Object.hasOwn(body, "outfitId") ||
-        !validOutfitId(body.outfitId)) {
+        Object.keys(body).some((key) => !["outfitId", "favourite"].includes(key)) ||
+        !Object.hasOwn(body, "outfitId") || !validOutfitId(body.outfitId) ||
+        (Object.hasOwn(body, "favourite") && typeof body.favourite !== "boolean")) {
       return res.status(400).json({ error: "Provide a valid outfitId" });
     }
 
@@ -20,6 +21,7 @@ function createSaveFavouritesController(dependencies) {
       const result = await dependencies.store.saveFavourite({
         outfitId: body.outfitId,
         userId: req.user.uid,
+        favourite: body.favourite ?? true,
       });
       return res.status(200).json({ success: true, ...result });
     } catch (error) {

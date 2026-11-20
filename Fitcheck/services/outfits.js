@@ -159,18 +159,18 @@ function createOutfitStore(db, bucket) {
       return ownedOutfit(outfitId, userId);
     },
 
-    async saveFavourite({ outfitId, userId }) {
+    async saveFavourite({ outfitId, userId, favourite = true }) {
       const outfitRef = db.collection(COLLECTIONS.details).doc(outfitId);
       await db.runTransaction(async (transaction) => {
         const outfitSnapshot = await transaction.get(outfitRef);
         if (!outfitSnapshot.exists || outfitSnapshot.data().userId !== userId) {
           throw new OutfitNotFoundError();
         }
-        if (outfitSnapshot.data().favourite !== true) {
-          transaction.update(outfitRef, { favourite: true });
+        if (outfitSnapshot.data().favourite !== favourite) {
+          transaction.update(outfitRef, { favourite });
         }
       });
-      return { outfitId, favourite: true };
+      return { outfitId, favourite };
     },
 
     async getAverageAnalysis({ userId }) {
