@@ -137,7 +137,17 @@ function fakeBucket() {
 async function setup(t, analyze = async () => analysis, fetchMedia = async (_url, label) => ({
   buffer: label === "Image" ? png : wav,
   mimeType: label === "Image" ? "image/png" : "audio/wav",
-}), styleMentor = async () => ({ tips: ["Try a jacket."] })) {
+}), styleMentor = async () => ({
+  tips: [
+    "Try a jacket.",
+    "Balance the colors.",
+    "Clean up the silhouette.",
+    "Keep accessories simple.",
+    "Press the main piece.",
+  ],
+  best_occasion: "Everyday",
+  occasion_reason: "The look is versatile for daily wear.",
+})) {
   const db = fakeFirestore();
   const bucket = fakeBucket();
   const auth = {
@@ -172,9 +182,20 @@ function get(url, outfitId, token = "alice", userId = token) {
 
 test("generates style tips for an owned photo without saving results", async (t) => {
   let context;
+  const fiveTips = [
+    "Try a neutral jacket.",
+    "Tuck the blouse for a cleaner line.",
+    "Keep jewelry minimal.",
+    "Swap to a solid bottom.",
+    "Press the blazer for sharper structure.",
+  ];
   const { db, bucket, url } = await setup(t, undefined, undefined, async (input) => {
     context = input;
-    return { tips: ["Try a neutral jacket."] };
+    return {
+      tips: fiveTips,
+      best_occasion: "Brunch",
+      occasion_reason: "The relaxed pieces suit a daytime social setting.",
+    };
   });
   const { outfitId } = await (await post(url, payload())).json();
   const records = [...db.records.entries()];
@@ -188,11 +209,19 @@ test("generates style tips for an owned photo without saving results", async (t)
   const response = await fetch(path, { headers: { Authorization: "Bearer alice" } });
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("cache-control"), "private, no-store");
-  assert.deepEqual(await response.json(), { outfitId, tips: ["Try a neutral jacket."] });
+  assert.deepEqual(await response.json(), {
+    outfitId,
+    photoUrl: `/api/outfits/${outfitId}/photo`,
+    tips: fiveTips,
+    best_occasion: "Brunch",
+    occasion_reason: "The relaxed pieces suit a daytime social setting.",
+  });
   assert.deepEqual(context, {
     image: png, mimeType: "image/png", userId: "alice",
-    outfitName: "Weekend", occasion: "Party", category: "Casual",
+    outfitName: "Weekend",
   });
+  assert.ok(!("occasion" in context));
+  assert.ok(!("category" in context));
   assert.deepEqual([...db.records.entries()], records);
   assert.deepEqual([...bucket.files.entries()], files);
   bucket.files.clear();
@@ -214,17 +243,47 @@ test("style tips report a model failure without saving feedback", async (t) => {
 test("style mentor sends image and context to Gemini and validates its response through ADK", async () => {
   let request;
   const client = {
-    models: { generateContent: async (input) => { request = input; return { text: '{"tips":["  Try a blue jacket.  "]}' }; } },
+    models: {
+      generateContent: async (input) => {
+        request = input;
+        return {
+          text: JSON.stringify({
+            tips: [
+              "  Try a blue jacket.  ",
+              "  Balance the colors.  ",
+              "  Clean up the silhouette.  ",
+              "  Keep accessories simple.  ",
+              "  Press the main piece.  ",
+            ],
+            best_occasion: "  Work  ",
+            occasion_reason: "  Structured pieces suit an office day.  ",
+          }),
+        };
+      },
+    },
   };
   const mentor = createStyleMentor("fake", "unused", client);
   assert.deepEqual(await mentor({
     image: png, mimeType: "image/png", userId: "alice",
     outfitName: "Look", occasion: "Work", category: "Casual",
-  }), { tips: ["Try a blue jacket."] });
+  }), {
+    tips: [
+      "Try a blue jacket.",
+      "Balance the colors.",
+      "Clean up the silhouette.",
+      "Keep accessories simple.",
+      "Press the main piece.",
+    ],
+    best_occasion: "Work",
+    occasion_reason: "Structured pieces suit an office day.",
+  });
   assert.match(request.config.systemInstruction, /untrusted data/);
-  assert.match(request.contents[0].parts[0].text, /"occasion":"Work"/);
+  assert.match(request.config.systemInstruction, /Do not use any user-supplied occasion/);
+  assert.match(request.config.systemInstruction, /exactly 5/);
+  assert.match(request.contents[0].parts[0].text, /exactly 5 general styling tips/);
+  assert.doesNotMatch(request.contents[0].parts[0].text, /"occasion":"Work"/);
   assert.equal(request.contents[0].parts[1].inlineData.data, png.toString("base64"));
-  client.models.generateContent = async () => ({ text: '{"tips":[]}' });
+  client.models.generateContent = async () => ({ text: '{"tips":["Only one"]}' });
   await assert.rejects(mentor({ image: png, mimeType: "image/png", userId: "alice" }), /ADK feedback validation failed/);
 });
 

@@ -112,9 +112,13 @@ function createAnalyzeController(dependencies) {
       const photo = await dependencies.store.getPhoto({ outfitId, userId });
       const result = await dependencies.styleMentor({
         image: photo.buffer, mimeType: photo.mimeType, userId,
-        outfitName: outfit.outfitName, occasion: outfit.occasion, category: outfit.category,
+        outfitName: outfit.outfitName,
       });
-      return res.set("Cache-Control", "private, no-store").json({ outfitId, ...result });
+      return res.set("Cache-Control", "private, no-store").json({
+        outfitId,
+        photoUrl: `/api/outfits/${encodeURIComponent(outfitId)}/photo`,
+        ...result,
+      });
     } catch (error) {
       return mapAnalyzeError(error, res, next);
     }
