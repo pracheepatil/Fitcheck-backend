@@ -68,6 +68,15 @@ test("profile API reads and patches the signed-in user's profile", async (t) => 
   assert.deepEqual(updated.aesthetics, ["Minimalist", "Casual"]);
   assert.equal(updated.email, "test@example.test");
 
+  const photoURL = "https://firebasestorage.googleapis.com/v0/b/test-bucket/o/profile%2Ftest-user.jpg?alt=media";
+  const photo = await fetch(url, {
+    method: "PATCH",
+    headers: { ...auth, ...json },
+    body: JSON.stringify({ photoURL }),
+  });
+  assert.equal(photo.status, 200);
+  assert.equal((await photo.json()).profile.photoURL, photoURL);
+
   const invalidBodies = [
     {},
     { email: "hacker@example.test" },
@@ -75,6 +84,9 @@ test("profile API reads and patches the signed-in user's profile", async (t) => 
     { aesthetics: ["Casual", "Casual"] },
     { name: "   " },
     { styleGoal: "x".repeat(501) },
+    { photoURL: "http://firebasestorage.googleapis.com/photo.jpg" },
+    { photoURL: "https://evil.example.com/photo.jpg" },
+    { photoURL: "not a url" },
   ];
   for (const body of invalidBodies) {
     const response = await fetch(url, { method: "PATCH", headers: { ...auth, ...json }, body: JSON.stringify(body) });

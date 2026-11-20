@@ -1,6 +1,19 @@
 const { AESTHETICS, ProfileNotFoundError, getProfile, updateProfile } = require("../services/profileService");
 
-const EDITABLE_FIELDS = ["name", "styleGoal", "aesthetics"];
+const EDITABLE_FIELDS = ["name", "styleGoal", "aesthetics", "photoURL"];
+const PHOTO_HOSTS = ["firebasestorage.googleapis.com", "storage.googleapis.com"];
+
+// Empty string removes the photo; otherwise only https Firebase Storage URLs are accepted.
+function isValidPhotoURL(value) {
+  if (typeof value !== "string" || value.length > 2048) return false;
+  if (value === "") return true;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && PHOTO_HOSTS.includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
 
 // Returns the validated changes, or null when the body is invalid.
 function validateProfileUpdate(body) {
@@ -33,6 +46,11 @@ function validateProfileUpdate(body) {
     changes.aesthetics = aesthetics;
   }
 
+  if ("photoURL" in body) {
+    if (!isValidPhotoURL(body.photoURL)) return null;
+    changes.photoURL = body.photoURL;
+  }
+
   return changes;
 }
 
@@ -53,7 +71,7 @@ async function updateProfileController(req, res, next) {
   if (!changes) {
     return res.status(400).json({
       success: false,
-      message: `Provide at least one of ${EDITABLE_FIELDS.join(", ")} with valid values. aesthetics must be unique values from: ${AESTHETICS.join(", ")}`
+      message: `Provide at least one of ${EDITABLE_FIELDS.join(", ")} with valid values. aesthetics must be unique values from: ${AESTHETICS.join(", ")}. photoURL must be an https Firebase Storage URL or ""`
     });
   }
 
