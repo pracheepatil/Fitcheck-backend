@@ -770,6 +770,39 @@ test("downloads and stores a WebM voice note sent with audio/webm", async (t) =>
   await assert.rejects(validateMediaContent(webm, "Audio", MAX_AUDIO_BYTES, audioTypes, "audio/mpeg"), InvalidMediaError);
 });
 
+test("accepts browser voice recordings served as video/webm", async (t) => {
+  const audioTypes = new Set(["audio/mpeg", "audio/wav", "audio/mp4", "audio/x-m4a", "audio/webm"]);
+  let accept;
+  t.mock.method(https, "get", (_url, options, callback) => {
+    accept = options.headers.Accept;
+    const request = new EventEmitter();
+    request.destroy = (error) => { if (error) request.emit("error", error); };
+    process.nextTick(() => {
+      const response = Readable.from([webm]);
+      response.statusCode = 200;
+      response.headers = { "content-type": "video/webm" };
+      callback(response);
+    });
+    return request;
+  });
+  const media = await downloadMedia("https://8.8.8.8/browser-voice.webm", "Audio", MAX_AUDIO_BYTES, audioTypes);
+  const voice = await validateMediaContent(media.buffer, "Audio", MAX_AUDIO_BYTES, audioTypes, media.contentType);
+  assert.equal(voice.mimeType, "audio/webm");
+  assert.ok(accept.includes("video/webm"));
+});
+
+test("accepts voice field alias for optional audio URL", async (t) => {
+  let context;
+  const { url } = await setup(t, async (input) => { context = input; return analysis; },
+    async (_sourceUrl, label) => ({
+      buffer: label === "Image" ? png : webm,
+      mimeType: label === "Image" ? "image/png" : "audio/webm",
+    }));
+  const response = await post(url, payload({ audio: undefined, voice: audioUrl }));
+  assert.equal(response.status, 201);
+  assert.equal(context.audio?.mimeType, "audio/webm");
+});
+
 test("rejects malformed, unauthorized, and legacy requests before persistence", async (t) => {
   let calls = 0;
   const { db, bucket, url } = await setup(t, async () => { calls++; return analysis; });
@@ -913,20 +946,22 @@ test("passes occasion and category to the Gemini model as context", async () => 
   assert.match(requests[0].config.systemInstruction, /category.*SECONDARY/);
   assert.match(requests[0].config.systemInstruction, /do not\s+assume a specific venue/i);
   assert.match(requests[0].config.systemInstruction, /If no outfit\s+is visible/);
+  assert.match(requests[0].config.systemInstruction, /VOICE NOTE/);
   await analyze({
     image: png, mimeType: "image/png", userId: "alice", outfitName: "Weekend look",
     occasion: "Party", category: "Casual",
   });
   const parts = requests[0].contents.flatMap((content) => content.parts || []);
-  const text = parts.find((part) => part.text?.includes("Outfit context:")).text;
+  const text = parts.find((part) => part.text?.includes("Outfit context from the app form:")).text;
   assert.ok(text.includes('"outfitName":"Blue blazer"'));
   assert.ok(text.includes('"occasion":"Job Interview"'));
   assert.ok(text.includes('"category":"Formal"'));
   assert.equal(parts.find((part) => part.inlineData).inlineData.data, png.toString("base64"));
   const audioPart = parts.find((part) => part.inlineData?.mimeType === "audio/webm");
   assert.equal(audioPart.inlineData.data, webm.toString("base64"));
+  assert.ok(parts.some((part) => part.text?.includes("voice note")));
   const secondText = requests[1].contents.flatMap((content) => content.parts || [])
-    .find((part) => part.text?.includes("Outfit context:")).text;
+    .find((part) => part.text?.includes("Outfit context from the app form:")).text;
   assert.ok(secondText.includes('"outfitName":"Weekend look"'));
   assert.ok(secondText.includes('"occasion":"Party"'));
   assert.ok(secondText.includes('"category":"Casual"'));

@@ -4,6 +4,7 @@ const { getFirestore } = require("firebase-admin/firestore");
 const { getStorage } = require("firebase-admin/storage");
 const { createAnalyzer, createStyleMentor } = require("./gemini");
 const { createOutfitStore } = require("./outfits");
+const { createLogger } = require("./logging");
 
 function createDependencies(env) {
   for (const name of ["GOOGLE_CLOUD_PROJECT", "FIREBASE_STORAGE_BUCKET", "GEMINI_API_KEY", "GEMINI_MODEL"]) {
@@ -17,10 +18,12 @@ function createDependencies(env) {
     projectId: env.GOOGLE_CLOUD_PROJECT,
     storageBucket: env.FIREBASE_STORAGE_BUCKET,
   });
+  const logger = createLogger({ projectId: env.GOOGLE_CLOUD_PROJECT });
   return {
     auth: getAuth(app),
-    analyze: createAnalyzer(env.GEMINI_MODEL, env.GEMINI_API_KEY),
-    styleMentor: createStyleMentor(env.GEMINI_MODEL, env.GEMINI_API_KEY),
+    logger,
+    analyze: createAnalyzer(env.GEMINI_MODEL, env.GEMINI_API_KEY, undefined, logger),
+    styleMentor: createStyleMentor(env.GEMINI_MODEL, env.GEMINI_API_KEY, undefined, logger),
     store: createOutfitStore(getFirestore(app), getStorage(app).bucket()),
   };
 }
