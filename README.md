@@ -56,12 +56,32 @@ that the server is responding.
 ### Style Mentor
 
 `GET /api/outfits/{outfitId}/style-tips` generates fresh tips for an owned
-outfit, using its stored photo, occasion and category. Use the `outfitId`
-returned by `GET /api/getMyFitList`. It returns:
+outfit from its stored photo only. Unlike style analysis, it does **not**
+use the outfit's saved occasion or category. Use the `outfitId` returned by
+`GET /api/getMyFitList`. It returns:
 
 ```json
-{ "outfitId": "uuid", "tips": ["Try a neutral jacket with the skirt."] }
+{
+  "outfitId": "uuid",
+  "photoUrl": "/api/outfits/uuid/photo",
+  "tips": [
+    "Try a neutral jacket with the skirt.",
+    "Tuck the blouse for a cleaner waistline.",
+    "Keep jewelry minimal so the print can lead.",
+    "Swap to a solid bottom to balance the pattern.",
+    "Press the blazer so the structure stays sharp."
+  ],
+  "best_occasion": "Work",
+  "occasion_reason": "The clean lines and structured pieces read polished enough for the office."
+}
 ```
+
+`photoUrl` is the authenticated photo endpoint for the same outfit (send the
+Firebase ID token). `tips` are exactly five general ways to improve how the
+outfit looks (fit, color balance, proportion, or a concrete garment swap)—not
+advice aimed at a style type or dress code. `best_occasion` is the occasion
+the look suits most (Everyday, Work, Interview, Party, Night out, Date night,
+Brunch, Wedding, Holiday, Workout, or Travel), with a short `occasion_reason`.
 
 Tips are generated on each request and are not saved to Firestore or Storage.
 Missing or unowned outfits and missing photos return `404`; authentication is

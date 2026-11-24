@@ -7,6 +7,8 @@ const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 15_000;
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const AUDIO_TYPES = new Set(["audio/mpeg", "audio/wav", "audio/mp4", "audio/x-m4a", "audio/webm"]);
+const AUDIO_DOWNLOAD_TYPES = new Set([...AUDIO_TYPES, "video/webm", "application/octet-stream"]);
+const MAX_MEDIA_REDIRECTS = 5;
 
 class InvalidMediaError extends Error {}
 class MediaFetchError extends Error {}
@@ -70,21 +72,32 @@ async function validateMediaContent(buffer, label, maxBytes, allowedTypes, conte
   } catch (error) {
     if (error.name !== "EndOfStreamError") throw error;
   }
-  const aliases = { "audio/x-m4a": "audio/mp4", "audio/x-wav": "audio/wav" };
-  const mimeType = detected?.mime === "video/webm" && label === "Audio" && contentType === "audio/webm"
+  const aliases = { "audio/x-m4a": "audio/mp4", "audio/x-wav": "audio/wav", "video/webm": "audio/webm" };
+  const mimeType = label === "Audio" && detected?.mime === "video/webm"
     ? "audio/webm"
     : detected && (aliases[detected.mime] || detected.mime);
   const declaredType = aliases[contentType] || contentType;
   if (!mimeType || !allowedTypes.has(mimeType) || (declaredType &&
-      declaredType !== "application/octet-stream" && declaredType !== mimeType)) {
+      declaredType !== "application/octet-stream" && declaredType !== mimeType &&
+      !(label === "Audio" && declaredType === "video/webm" && mimeType === "audio/webm"))) {
     throw new InvalidMediaError(`${label} URL content does not match an allowed file type`);
   }
   return { buffer, mimeType };
 }
 
-async function downloadMedia(value, label, maxBytes, allowedTypes) {
+function isAllowedDownloadContentType(label, contentType, allowedTypes) {
+  if (!contentType) return true;
+  if (allowedTypes.has(contentType)) return true;
+  if (contentType === "application/octet-stream") return true;
+  return label === "Audio" && contentType === "video/webm";
+}
+
+async function downloadMedia(value, label, maxBytes, allowedTypes, redirectCount = 0) {
   const url = validateMediaUrl(value, label);
   const address = await resolvePublicIPv4(url.hostname);
+  const acceptTypes = label === "Audio"
+    ? [...new Set([...allowedTypes, "video/webm", "application/octet-stream"])]
+    : [...allowedTypes];
 
   const downloaded = await new Promise((resolve, reject) => {
     let settled = false;
@@ -94,21 +107,35 @@ async function downloadMedia(value, label, maxBytes, allowedTypes) {
       reject(error);
     };
     const request = https.get(url, {
-      headers: { Accept: [...allowedTypes].join(", ") },
+      headers: { Accept: acceptTypes.join(", ") },
       timeout: FETCH_TIMEOUT_MS,
       lookup: (_hostname, options, callback) => {
         if (options.all) callback(null, [{ address, family: 4 }]);
         else callback(null, address, 4);
       },
     }, (response) => {
+      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+        response.resume();
+        if (redirectCount >= MAX_MEDIA_REDIRECTS) {
+          fail(new MediaFetchError("Media URL could not be downloaded"));
+          return;
+        }
+        try {
+          const redirectTarget = new URL(response.headers.location, url).href;
+          downloadMedia(redirectTarget, label, maxBytes, allowedTypes, redirectCount + 1).then(resolve).catch(fail);
+        } catch (error) {
+          fail(error instanceof InvalidMediaError || error instanceof MediaFetchError
+            ? error : new MediaFetchError("Unable to download media URL"));
+        }
+        return;
+      }
       if (response.statusCode < 200 || response.statusCode >= 300) {
         response.resume();
         fail(new MediaFetchError("Media URL could not be downloaded"));
         return;
       }
       const contentType = response.headers["content-type"]?.split(";")[0].trim().toLowerCase();
-      if (contentType && !allowedTypes.has(contentType) &&
-          !(contentType === "application/octet-stream")) {
+      if (!isAllowedDownloadContentType(label, contentType, allowedTypes)) {
         response.resume();
         fail(new InvalidMediaError(`${label} URL returned an unsupported content type`));
         return;
@@ -148,17 +175,39 @@ async function downloadMedia(value, label, maxBytes, allowedTypes) {
   return downloaded;
 }
 
-function createAnalyzeService({ analyze, store, fetchMedia = downloadMedia }) {
+function createAnalyzeService({ analyze, store, fetchMedia = downloadMedia, logger }) {
+  async function fetchMediaWithLogging(mediaUrl, label, maxBytes, allowedTypes) {
+    if (!logger) return fetchMedia(mediaUrl, label, maxBytes, allowedTypes);
+    let host;
+    try {
+      host = new URL(mediaUrl).hostname;
+    } catch {
+      host = "unknown";
+    }
+    return logger.logServiceCall("HTTPS", `media.${label.toLowerCase()}`, () =>
+      fetchMedia(mediaUrl, label, maxBytes, allowedTypes), { urlHost: host });
+  }
+
   return {
     async analyzeOutfit({ userId, image, audio, details }) {
       validateMediaUrl(image, "Image");
       if (audio != null) validateMediaUrl(audio, "Audio");
-      const photoResponse = await fetchMedia(image, "Image", MAX_IMAGE_BYTES, IMAGE_TYPES);
+      const photoResponse = await fetchMediaWithLogging(image, "Image", MAX_IMAGE_BYTES, IMAGE_TYPES);
       const photo = await validateMediaContent(photoResponse.buffer, "Image", MAX_IMAGE_BYTES, IMAGE_TYPES, photoResponse.contentType);
-      const audioResponse = audio == null ? undefined : await fetchMedia(audio, "Audio", MAX_AUDIO_BYTES, AUDIO_TYPES);
+      const audioResponse = audio == null ? undefined : await fetchMediaWithLogging(audio, "Audio", MAX_AUDIO_BYTES, AUDIO_TYPES);
       const voice = audioResponse && await validateMediaContent(
         audioResponse.buffer, "Audio", MAX_AUDIO_BYTES, AUDIO_TYPES, audioResponse.contentType,
       );
+      if (logger) {
+        await logger.write({
+          logType: "analyze_input",
+          hasAudio: !!voice,
+          audioMimeType: voice?.mimeType,
+          audioBytes: voice?.buffer?.length,
+          imageMimeType: photo.mimeType,
+          imageBytes: photo.buffer.length,
+        });
+      }
       const outfitId = await store.createSubmission({
         userId, image: photo.buffer, mimeType: photo.mimeType, ...details, audio: voice,
       });
@@ -182,6 +231,6 @@ function createAnalyzeService({ analyze, store, fetchMedia = downloadMedia }) {
 }
 
 module.exports = {
-  createAnalyzeService, MAX_IMAGE_BYTES, MAX_AUDIO_BYTES, InvalidMediaError, MediaFetchError,
-  validateMediaUrl, validateMediaContent, resolvePublicIPv4, downloadMedia,
+  createAnalyzeService, MAX_IMAGE_BYTES, MAX_AUDIO_BYTES, AUDIO_DOWNLOAD_TYPES, InvalidMediaError,
+  MediaFetchError, validateMediaUrl, validateMediaContent, resolvePublicIPv4, downloadMedia,
 };

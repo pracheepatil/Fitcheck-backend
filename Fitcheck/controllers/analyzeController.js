@@ -9,7 +9,17 @@ const {
 const { InvalidMediaError, MediaFetchError, createAnalyzeService } = require("../services/analyzeService");
 
 const DETAIL_FIELDS = ["outfitName", "occasion", "category"];
-const REQUEST_FIELDS = new Set(["image", "audio", ...DETAIL_FIELDS]);
+const REQUEST_FIELDS = new Set(["image", "audio", "voice", "voiceNote", ...DETAIL_FIELDS]);
+
+function normalizeAnalyzeBody(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+  const normalized = { ...body };
+  if (normalized.audio == null && normalized.voice != null) normalized.audio = normalized.voice;
+  if (normalized.audio == null && normalized.voiceNote != null) normalized.audio = normalized.voiceNote;
+  delete normalized.voice;
+  delete normalized.voiceNote;
+  return normalized;
+}
 
 function createAnalyzeResponse(outfitId) {
   return { status: "success", outfitId };
@@ -48,22 +58,23 @@ function createAnalyzeController(dependencies) {
   }
 
   async function analyzeOutfit(req, res, next) {
-    if (!req.body || typeof req.body !== "object" || Array.isArray(req.body) ||
-        Object.keys(req.body).some((key) => !REQUEST_FIELDS.has(key)) ||
-        typeof req.body.image !== "string" || !req.body.image.trim() || req.body.image.length > 16_384 ||
-        (req.body.audio != null && (typeof req.body.audio !== "string" ||
-          !req.body.audio.trim() || req.body.audio.length > 16_384)) ||
-        DETAIL_FIELDS.some((key) => typeof req.body[key] !== "string" ||
-          !req.body[key].trim() || req.body[key].length > 100)) {
+    const body = normalizeAnalyzeBody(req.body);
+    if (!body || typeof body !== "object" || Array.isArray(body) ||
+        Object.keys(body).some((key) => !REQUEST_FIELDS.has(key)) ||
+        typeof body.image !== "string" || !body.image.trim() || body.image.length > 16_384 ||
+        (body.audio != null && (typeof body.audio !== "string" ||
+          !body.audio.trim() || body.audio.length > 16_384)) ||
+        DETAIL_FIELDS.some((key) => typeof body[key] !== "string" ||
+          !body[key].trim() || body[key].length > 100)) {
       return res.status(400).json({ error: "Provide an image and valid outfitName, occasion and category" });
     }
 
     try {
       const outfitId = await analyzeService.analyzeOutfit({
         userId: req.user.uid,
-        image: req.body.image,
-        audio: req.body.audio,
-        details: Object.fromEntries(DETAIL_FIELDS.map((key) => [key, req.body[key].trim()])),
+        image: body.image,
+        audio: body.audio,
+        details: Object.fromEntries(DETAIL_FIELDS.map((key) => [key, body[key].trim()])),
       });
       return res.status(201).json(createAnalyzeResponse(outfitId));
     } catch (error) {
@@ -112,9 +123,13 @@ function createAnalyzeController(dependencies) {
       const photo = await dependencies.store.getPhoto({ outfitId, userId });
       const result = await dependencies.styleMentor({
         image: photo.buffer, mimeType: photo.mimeType, userId,
-        outfitName: outfit.outfitName, occasion: outfit.occasion, category: outfit.category,
+        outfitName: outfit.outfitName,
       });
-      return res.set("Cache-Control", "private, no-store").json({ outfitId, ...result });
+      return res.set("Cache-Control", "private, no-store").json({
+        outfitId,
+        photoUrl: `/api/outfits/${encodeURIComponent(outfitId)}/photo`,
+        ...result,
+      });
     } catch (error) {
       return mapAnalyzeError(error, res, next);
     }
