@@ -506,6 +506,85 @@ test("getMyFitList paginates 45 outfits in pages of 20", async (t) => {
     .map((outfit) => outfit.outfitId)).size, 45);
 });
 
+test("getStyleJourney groups the authenticated user's outfits into six calendar weeks", async (t) => {
+  const { db, url } = await setup(t);
+  const now = new Date();
+  const currentWeekStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  currentWeekStart.setUTCDate(currentWeekStart.getUTCDate() - ((currentWeekStart.getUTCDay() + 6) % 7));
+  const previousWeekDate = new Date(currentWeekStart);
+  previousWeekDate.setUTCDate(previousWeekDate.getUTCDate() - 6);
+  const currentWeekDate = new Date(now);
+  const outsideRangeDate = new Date(currentWeekStart);
+  outsideRangeDate.setUTCDate(outsideRangeDate.getUTCDate() - 43);
+  const outfits = [
+    ["alice-previous-week", previousWeekDate, "Previous week look"],
+    ["alice-current-week", currentWeekDate, "Current week look"],
+    ["alice-outside-range", outsideRangeDate, "Old look"],
+    ["bob-current-week", currentWeekDate, "Bob's look"],
+  ];
+  outfits.forEach(([outfitId, createdAt, outfitName]) => {
+    const userId = outfitId.startsWith("alice-") ? "alice" : "bob";
+    db.records.set(`fitcheck_outfit_details/${outfitId}`, {
+      userId, outfitName, occasion: "Everyday", category: "Casual", createdAt, status: "uploaded",
+    });
+  });
+  for (const outfitId of ["alice-previous-week", "alice-current-week", "bob-current-week"]) {
+    db.records.set(`fitcheck_outfit_media/media-${outfitId}`, {
+      mediaId: `media-${outfitId}`,
+      outfitId,
+      PhotoStoragePath: `outfits/${outfitId}/photos/front.jpg`,
+      PhotoUrl: `https://storage.example/${outfitId}.jpg`,
+    });
+  }
+  db.records.set("fitcheck_outfit_analysis/analysis-previous-week", {
+    analysis_id: "analysis-previous-week",
+    outfit_id: "alice-previous-week",
+    user_id: "alice",
+    overall_score: 80,
+  });
+  db.records.set("fitcheck_outfit_analysis/analysis-current-week", {
+    analysis_id: "analysis-current-week",
+    outfit_id: "alice-current-week",
+    user_id: "alice",
+    overall_score: 90,
+  });
+  db.records.set("fitcheck_outfit_analysis/analysis-bob", {
+    analysis_id: "analysis-bob",
+    outfit_id: "bob-current-week",
+    user_id: "bob",
+    overall_score: 100,
+  });
+
+  const response = await fetch(`${url}/getStyleJourney`, {
+    headers: { Authorization: "Bearer alice" },
+  });
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.weeks.length, 6);
+  assert.equal(result.weeks[4].averageOutfitScore, 80);
+  assert.equal(result.weeks[4].outfits.length, 1);
+  assert.deepEqual(result.weeks[4].outfits[0], {
+    outfitId: "alice-previous-week",
+    outfitName: "Previous week look",
+    category: "Casual",
+    occasion: "Everyday",
+    createdAt: previousWeekDate.toISOString(),
+    photoUrl: "https://signed.example/outfits%2Falice-previous-week%2Fphotos%2Ffront.jpg?signature=test",
+    averageOutfitScore: 80,
+  });
+  assert.equal(result.weeks[5].averageOutfitScore, 90);
+  assert.deepEqual(result.weeks[5].outfits.map((outfit) => outfit.outfitId), ["alice-current-week"]);
+  assert.equal(result.weeks.flatMap((week) => week.outfits)
+    .some((outfit) => outfit.outfitId === "alice-outside-range" || outfit.outfitId === "bob-current-week"), false);
+  assert.equal((await fetch(`${url}/getStyleJourney?weeks=0`, {
+    headers: { Authorization: "Bearer alice" },
+  })).status, 400);
+  assert.equal((await fetch(`${url}/getStyleJourney?weeks=53`, {
+    headers: { Authorization: "Bearer alice" },
+  })).status, 400);
+  assert.equal((await fetch(`${url}/getStyleJourney`)).status, 401);
+});
+
 test("getFavouriteList returns only the authenticated user's outfits marked favourite", async (t) => {
   const { db, url } = await setup(t);
   const records = [

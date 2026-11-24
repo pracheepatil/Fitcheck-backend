@@ -4,6 +4,7 @@ const { createAverageAnalysisController } = require("../controllers/averageAnaly
 const { createSaveFavouritesController } = require("../controllers/saveFavouritesController");
 const { createMyFitListController } = require("../controllers/myFitListController");
 const { createFavouriteListController } = require("../controllers/favouriteListController");
+const { createStyleJourneyController } = require("../controllers/styleJourneyController");
 
 function createFitcheckRouter(dependencies) {
   const router = express.Router();
@@ -13,12 +14,14 @@ function createFitcheckRouter(dependencies) {
   const saveFavourites = createSaveFavouritesController(dependencies);
   const getMyFitList = createMyFitListController(dependencies);
   const getFavouriteList = createFavouriteListController(dependencies);
+  const getStyleJourney = createStyleJourneyController(dependencies);
 
   router.post("/sendMessage", express.json(), sendMessageController);
   router.put("/saveFavourites", express.json(), saveFavourites);
   router.get("/getAverageAnalysis", getAverageAnalysis);
   router.get("/getMyFitList", getMyFitList);
   router.get("/getFavouriteList", getFavouriteList);
+  router.get("/getStyleJourney", getStyleJourney);
   router.post("/analyze", analyzeOutfit);
   router.get("/getOutfitAnalysis", getAnalysis);
   router.get("/outfits/:outfitId/photo", getPhoto);

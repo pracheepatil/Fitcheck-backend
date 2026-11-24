@@ -11,6 +11,8 @@ const AUDIO_EXTENSIONS = { "audio/mpeg": "mp3", "audio/wav": "wav", "audio/x-wav
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const PHOTO_URL_TTL_MS = 24 * 60 * 60 * 1000;
 const FIT_LIST_PAGE_SIZE = 20;
+const DEFAULT_STYLE_JOURNEY_WEEKS = 6;
+const MAX_STYLE_JOURNEY_WEEKS = 52;
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const FIRESTORE_IN_QUERY_LIMIT = 30;
 const SCORE_FIELDS = {
@@ -74,6 +76,38 @@ function createOutfitStore(db, bucket) {
     return Math.round((validValues.reduce((sum, value) => sum + value, 0) / validValues.length) * 100) / 100;
   }
 
+  function toDate(value) {
+    const date = value instanceof Date
+      ? value
+      : typeof value?.toDate === "function"
+        ? value.toDate()
+        : new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  function startOfUtcWeek(date) {
+    const start = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+    start.setUTCDate(start.getUTCDate() - ((start.getUTCDay() + 6) % 7));
+    return start;
+  }
+
+  function dateString(date) {
+    return date.toISOString().slice(0, 10);
+  }
+
+  async function signedPhotoUrl(outfitId, media) {
+    const storagePath = media ? photoStoragePath(media) : "";
+    if (!storagePath) return media?.PhotoUrl ?? "";
+    if (!storagePath.startsWith(`outfits/${outfitId}/`)) {
+      throw new OutfitDataConflictError();
+    }
+    const [url] = await bucket.file(storagePath).getSignedUrl({
+      action: "read",
+      expires: Date.now() + PHOTO_URL_TTL_MS,
+    });
+    return url;
+  }
+
   async function getUserFitList(userId, favouritesOnly = false, signedPhotoUrls = false, page = null) {
     let outfitsQuery = db.collection(COLLECTIONS.details).where("userId", "==", userId);
     if (favouritesOnly) outfitsQuery = outfitsQuery.where("favourite", "==", true);
@@ -128,18 +162,7 @@ function createOutfitStore(db, bucket) {
       const media = mediaByOutfitId.get(outfit.outfitId);
       const analysis = analysisByOutfitId.get(outfit.outfitId);
       let photoUrl = media?.PhotoUrl ?? "";
-      const storagePath = media ? photoStoragePath(media) : "";
-      if (signedPhotoUrls && storagePath) {
-        const expectedPrefix = `outfits/${outfit.outfitId}/`;
-        if (!storagePath.startsWith(expectedPrefix)) {
-          throw new OutfitDataConflictError();
-        }
-        const [signedUrl] = await bucket.file(storagePath).getSignedUrl({
-          action: "read",
-          expires: Date.now() + PHOTO_URL_TTL_MS,
-        });
-        photoUrl = signedUrl;
-      }
+      if (signedPhotoUrls) photoUrl = await signedPhotoUrl(outfit.outfitId, media);
       return {
         outfitId: outfit.outfitId,
         category: outfit.category ?? "",
@@ -220,6 +243,88 @@ function createOutfitStore(db, bucket) {
 
     async getMyFitList({ userId, page = 1 }) {
       return getUserFitList(userId, false, true, page);
+    },
+
+    async getStyleJourney({ userId, weeks = DEFAULT_STYLE_JOURNEY_WEEKS }) {
+      const now = new Date();
+      const currentWeekStart = startOfUtcWeek(now);
+      const firstWeekStart = new Date(currentWeekStart);
+      firstWeekStart.setUTCDate(firstWeekStart.getUTCDate() - (weeks - 1) * 7);
+      const weekBuckets = Array.from({ length: weeks }, (_, index) => {
+        const startDate = new Date(firstWeekStart);
+        startDate.setUTCDate(startDate.getUTCDate() + index * 7);
+        const endDate = new Date(startDate);
+        endDate.setUTCDate(endDate.getUTCDate() + 6);
+        return {
+          week: index + 1,
+          startDate: dateString(startDate),
+          endDate: dateString(endDate),
+          averageOutfitScore: null,
+          outfits: [],
+        };
+      });
+
+      const outfitSnapshot = await db.collection(COLLECTIONS.details)
+        .where("userId", "==", userId)
+        .get();
+      const recentOutfits = outfitSnapshot.docs
+        .map((record) => ({ ...record.data(), outfitId: record.id, createdAt: toDate(record.data().createdAt) }))
+        .filter((outfit) =>
+          outfit.createdAt &&
+          outfit.createdAt >= firstWeekStart &&
+          outfit.createdAt <= now
+        );
+      const outfitIds = recentOutfits.map((outfit) => outfit.outfitId);
+      const mediaRecords = [];
+      const analysisRecords = [];
+
+      for (let offset = 0; offset < outfitIds.length; offset += FIRESTORE_IN_QUERY_LIMIT) {
+        const batchIds = outfitIds.slice(offset, offset + FIRESTORE_IN_QUERY_LIMIT);
+        const [mediaSnapshot, analysisSnapshot] = await Promise.all([
+          db.collection(COLLECTIONS.media).where("outfitId", "in", batchIds).get(),
+          db.collection(COLLECTIONS.analysis).where("outfit_id", "in", batchIds).get(),
+        ]);
+        mediaRecords.push(...mediaSnapshot.docs.map((record) => record.data()));
+        analysisRecords.push(...analysisSnapshot.docs.map((record) => record.data()));
+      }
+
+      const mediaByOutfitId = new Map(
+        mediaRecords.map((record) => [record.outfitId, record])
+      );
+      const analysisByOutfitId = new Map(
+        analysisRecords
+          .filter((record) => record.user_id === userId)
+          .map((record) => [record.outfit_id, record])
+      );
+
+      for (const outfit of recentOutfits) {
+        const weekIndex = Math.floor(
+          (startOfUtcWeek(outfit.createdAt).getTime() - firstWeekStart.getTime()) /
+          (7 * 24 * 60 * 60 * 1000)
+        );
+        const media = mediaByOutfitId.get(outfit.outfitId);
+        const analysis = analysisByOutfitId.get(outfit.outfitId);
+        weekBuckets[weekIndex].outfits.push({
+          outfitId: outfit.outfitId,
+          outfitName: outfit.outfitName ?? "",
+          category: outfit.category ?? "",
+          occasion: outfit.occasion ?? "",
+          createdAt: outfit.createdAt.toISOString(),
+          photoUrl: await signedPhotoUrl(outfit.outfitId, media),
+          averageOutfitScore: typeof analysis?.overall_score === "number"
+            ? analysis.overall_score
+            : null,
+        });
+      }
+
+      for (const week of weekBuckets) {
+        week.outfits.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+        week.averageOutfitScore = average(
+          week.outfits.map((outfit) => outfit.averageOutfitScore)
+        );
+      }
+
+      return { weeks: weekBuckets };
     },
 
     async getFavouriteList({ userId, page = 1 }) {
@@ -391,4 +496,5 @@ function createOutfitStore(db, bucket) {
 module.exports = {
   createOutfitStore, COLLECTIONS, OutfitNotFoundError,
   OutfitMediaNotFoundError, OutfitAnalysisNotFoundError, OutfitDataConflictError,
+  DEFAULT_STYLE_JOURNEY_WEEKS, MAX_STYLE_JOURNEY_WEEKS,
 };

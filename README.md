@@ -193,6 +193,49 @@ averages; it is `null` if there are no valid criterion scores.
 Saved inspirations are the signed-in user's outfit records whose `favourite`
 field is exactly `true`.
 
+### Get Style Journey
+
+`GET /api/getStyleJourney` requires a Firebase ID token and returns six weekly
+buckets for the authenticated user, oldest to newest, including the current
+UTC calendar week. Set `weeks` to an integer from 1 to 52 to change the number
+of buckets. Weeks run Monday through Sunday. Each outfit appears only in the
+week it was created; weeks without outfits are returned with an empty list and
+a `null` average score. The weekly score is the average of available outfit
+analysis scores.
+
+Each outfit includes its name, category, occasion, creation time, score, and
+photo URL. Private Storage photos use signed read URLs that expire after 24
+hours; use the complete URL as returned.
+
+```sh
+curl "$BASE_URL/api/getStyleJourney?weeks=6" \
+  -H "Authorization: Bearer $FIREBASE_ID_TOKEN"
+```
+
+```json
+{
+  "weeks": [
+    {
+      "week": 1,
+      "startDate": "2026-10-12",
+      "endDate": "2026-10-18",
+      "averageOutfitScore": 82,
+      "outfits": [
+        {
+          "outfitId": "outfit-uuid",
+          "outfitName": "Weekend look",
+          "category": "Casual",
+          "occasion": "Brunch",
+          "createdAt": "2026-10-15T18:30:00.000Z",
+          "photoUrl": "https://storage.googleapis.com/...",
+          "averageOutfitScore": 82
+        }
+      ]
+    }
+  ]
+}
+```
+
 ### List the signed-in user's outfits
 
 `GET /api/getMyFitList` requires a Firebase ID token and returns outfit details
@@ -200,7 +243,7 @@ belonging to that token's user ID. Each item includes its category, occasion,
 outfit name, photo URL, and the analysis `overall_score` as
 `averageOutfitScore`. The score is `null` until analysis is available.
 For stored private photos, `photoUrl` is a signed Storage URL that can be used
-directly as an image source and expires after 15 minutes. Legacy media without
+directly as an image source and expires after 24 hours. Legacy media without
 a Storage path returns its stored `PhotoUrl`.
 The endpoint returns 20 outfits per page by default. Pass a one-based `page`
 query parameter to retrieve another page; the response includes pagination
