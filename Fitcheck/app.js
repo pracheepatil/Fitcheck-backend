@@ -1,19 +1,10 @@
 const express = require("express");
 const { createFitcheckRouter } = require("./routes/fitcheckRoutes");
 
-function createApp(dependencies, { apiRoutes = [], allowedOrigins = [] } = {}) {
+function createApp(dependencies, { apiRoutes = [] } = {}) {
   const app = express();
   app.use((req, res, next) => {
-    const origin = req.get("origin");
-    if (origin && allowedOrigins.length && !allowedOrigins.includes(origin)) {
-      return res.status(403).json({ error: "Origin not allowed" });
-    }
-    if (origin && allowedOrigins.length) {
-      res.vary("Origin");
-      res.set("Access-Control-Allow-Origin", origin);
-    } else {
-      res.set("Access-Control-Allow-Origin", "*");
-    }
+    res.set("Access-Control-Allow-Origin", "*");
     if (req.method === "OPTIONS") {
       res.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
       res.set("Access-Control-Allow-Headers", "Authorization, Content-Type");
@@ -46,8 +37,7 @@ if (require.main === module) {
       ["/api/auth", require("./routes/authRoutes")],
       ["/api", require("./routes/firebaseTestRoutes")],
     ];
-    const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || "").split(",").map((origin) => origin.trim()).filter(Boolean);
-    const app = createApp(dependencies, { apiRoutes, allowedOrigins });
+    const app = createApp(dependencies, { apiRoutes });
     const port = process.env.PORT || 5001;
     app.listen(port, "0.0.0.0", () => console.log(`Server running on port ${port}`));
   } catch (error) {

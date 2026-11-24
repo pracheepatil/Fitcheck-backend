@@ -54,7 +54,7 @@ test("merged authentication and analyzer routes are mounted together", async (t)
     auth: { verifyIdToken: async () => ({ uid: "test-user" }) },
     analyze: async () => ({}),
     store: {},
-  }, { apiRoutes }).listen(0, "127.0.0.1");
+  }, { apiRoutes, allowedOrigins: ["http://localhost:3000"] }).listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const url = `http://127.0.0.1:${server.address().port}`;
