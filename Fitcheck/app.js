@@ -2,7 +2,7 @@ const express = require("express");
 const { createFitcheckRouter } = require("./routes/fitcheckRoutes");
 const { createLogger, createRequestLoggingMiddleware, createClientLogsHandler } = require("./services/logging");
 
-function createApp(dependencies, { apiRoutes = [], allowedOrigins = [], logger } = {}) {
+function createApp(dependencies, { apiRoutes = [], logger } = {}) {
   const activeLogger = logger || dependencies.logger ||
     createLogger({ projectId: process.env.GOOGLE_CLOUD_PROJECT });
   const app = express();
