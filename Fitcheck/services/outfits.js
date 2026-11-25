@@ -108,9 +108,10 @@ function createOutfitStore(db, bucket) {
     return url;
   }
 
-  async function getUserFitList(userId, favouritesOnly = false, signedPhotoUrls = false, page = null) {
+  async function getUserFitList(userId, favouritesOnly = false, signedPhotoUrls = false, page = null, category) {
     let outfitsQuery = db.collection(COLLECTIONS.details).where("userId", "==", userId);
     if (favouritesOnly) outfitsQuery = outfitsQuery.where("favourite", "==", true);
+    if (category) outfitsQuery = outfitsQuery.where("category", "==", category);
     let pagination = null;
     let outfitsSnapshot;
     if (page !== null) {
@@ -327,8 +328,8 @@ function createOutfitStore(db, bucket) {
       return { weeks: weekBuckets };
     },
 
-    async getFavouriteList({ userId, page = 1 }) {
-      return getUserFitList(userId, true, true, page);
+    async getFavouriteList({ userId, page = 1, category }) {
+      return getUserFitList(userId, true, true, page, category);
     },
 
     async getAnalysis({ outfitId, userId }) {

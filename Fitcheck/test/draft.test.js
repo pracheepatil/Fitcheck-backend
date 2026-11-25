@@ -623,11 +623,7 @@ test("getFavouriteList returns only the authenticated user's outfits marked favo
   ];
   records.forEach(([path, value]) => db.records.set(path, value));
 
-  const response = await fetch(`${url}/getFavouriteList`, {
-    headers: { Authorization: "Bearer alice" },
-  });
-  assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), {
+  const expected = {
     outfits: [
       {
         outfitId: "alice-saved",
@@ -654,7 +650,22 @@ test("getFavouriteList returns only the authenticated user's outfits marked favo
       hasNextPage: false,
       hasPreviousPage: false,
     },
+  };
+  const response = await fetch(`${url}/getFavouriteList`, {
+    headers: { Authorization: "Bearer alice" },
   });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), expected);
+  const allCategories = await fetch(`${url}/getFavouriteList?category=All`, {
+    headers: { Authorization: "Bearer alice" },
+  });
+  assert.equal(allCategories.status, 200);
+  assert.deepEqual(await allCategories.json(), expected);
+  const formalOnly = await fetch(`${url}/getFavouriteList?category=Formal`, {
+    headers: { Authorization: "Bearer alice" },
+  });
+  assert.equal(formalOnly.status, 200);
+  assert.deepEqual((await formalOnly.json()).outfits.map((outfit) => outfit.outfitId), ["alice-saved"]);
   assert.equal((await fetch(`${url}/getFavouriteList?page=0`, {
     headers: { Authorization: "Bearer alice" },
   })).status, 400);
