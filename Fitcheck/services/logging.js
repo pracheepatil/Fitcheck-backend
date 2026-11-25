@@ -3,6 +3,9 @@ const crypto = require("node:crypto");
 
 const REQUEST_ID_HEADER = "x-request-id";
 const requestContext = new AsyncLocalStorage();
+const CLOUD_LOG_SEVERITIES = new Set([
+  "DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT", "EMERGENCY",
+]);
 
 function getRequestId() {
   return requestContext.getStore()?.requestId;
@@ -41,7 +44,11 @@ function createLogger({ projectId, logName = "fitcheck", writeEntry } = {}) {
     }
     if (cloudLog) {
       try {
-        await cloudLog.write(cloudLog.entry({ severity, jsonPayload: payload }));
+         await cloudLog.write(cloudLog.entry({
+          severity,
+          ...(entry.resource ? { resource: entry.resource } : {}),
+          jsonPayload: payload,
+        }));
         return;
       } catch (error) {
         console.error("Cloud Logging write failed, falling back to stdout:", error.message);
@@ -145,6 +152,54 @@ function createClientLogsHandler(logger) {
   };
 }
 
+function validateFrontendLog(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return "Request body must be a JSON object";
+  }
+  if (typeof body.event !== "string" || !body.event.trim()) return "event is required";
+  if (body.event.length > 100) return "event is too long";
+  if (body.level !== undefined &&
+      (typeof body.level !== "string" || !CLOUD_LOG_SEVERITIES.has(body.level.trim().toUpperCase()))) {
+    return "level must be a valid Cloud Logging severity";
+  }
+  if (body.url !== undefined && (typeof body.url !== "string" || body.url.length > 2_048)) {
+    return "url must be a string of at most 2048 characters";
+  }
+  if (body.timestamp !== undefined &&
+      (typeof body.timestamp !== "string" || Number.isNaN(Date.parse(body.timestamp)))) {
+    return "timestamp must be a valid date string";
+  }
+  if (body.details !== undefined && JSON.stringify(body.details).length > 10_000) {
+    return "details is too long";
+  }
+  return null;
+}
+
+function createFrontendLogsHandler(logger) {
+  return async (req, res) => {
+    const validationError = validateFrontendLog(req.body);
+    if (validationError) return res.status(400).json({ error: validationError });
+    const { event, details, url, timestamp } = req.body;
+    const severity = (req.body.level || "INFO").trim().toUpperCase();
+    try {
+      await logger.write({
+        logType: "frontend_log",
+        source: "ReactJS-Frontend",
+        severity,
+        resource: { type: "global" },
+        event: event.trim(),
+        details,
+        url: url?.trim(),
+        clientTimestamp: timestamp,
+      });
+      return res.status(200).json({ status: "logged" });
+    } catch (error) {
+      console.error("Failed to write frontend log:", error);
+      return res.status(500).json({ error: "Logging failed" });
+    }
+  };
+}
+
 module.exports = {
   REQUEST_ID_HEADER,
   createLogger,
@@ -153,4 +208,6 @@ module.exports = {
   getRequestId,
   runWithRequestContext,
   validateClientLog,
+  createFrontendLogsHandler,
+  validateFrontendLog
 };

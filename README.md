@@ -288,14 +288,29 @@ Photo URLs for stored private photos are signed and expire after 15 minutes,
 just like the URLs returned by `/api/getMyFitList`; legacy media without a
 Storage path uses its stored `PhotoUrl`. This endpoint returns 20 favourites
 per page by default and accepts the same one-based `page` query parameter.
+Pass an optional `category` query parameter to return only favourites in that
+category; omit it or pass `All` to return favourites from every category.
 
 ```sh
-curl "$BASE_URL/api/getFavouriteList?page=1" \
+curl "$BASE_URL/api/getFavouriteList?page=1&category=Formal" \
   -H "Authorization: Bearer $FIREBASE_ID_TOKEN"
 ```
 
 The response uses the same outfits and pagination shape as `/getMyFitList`;
 it returns an empty array when the user has no favourites.
+
+### Frontend logging
+
+`POST /api/log-frontend` writes a React frontend event to the
+`react-frontend-logs` Cloud Logging log. `event` is required; `level` defaults
+to `INFO` and accepts standard Cloud Logging severities. `details`, `url`, and
+an ISO-8601 `timestamp` are optional.
+
+```sh
+curl -X POST "$BASE_URL/api/log-frontend" \
+  -H "Content-Type: application/json" \
+  --data '{"level":"WARNING","event":"api_failure","details":{"status":502},"url":"/outfits","timestamp":"2026-11-25T12:00:00.000Z"}'
+```
 
 ### Save an outfit as a favourite
 

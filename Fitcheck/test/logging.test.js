@@ -5,6 +5,7 @@ const {
   createLogger,
   createClientLogsHandler,
   validateClientLog,
+  validateFrontendLog,
   runWithRequestContext,
 } = require("../services/logging");
 
@@ -15,6 +16,11 @@ test("validateClientLog accepts required fields", () => {
     validateClientLog({ event: "click", message: "ok", requestId: "req-1", page: "/home" }),
     null,
   );
+});
+
+test("validateFrontendLog validates Cloud Logging payloads", () => {
+  assert.equal(validateFrontendLog({ event: "page_loaded", level: "warning", url: "/home" }), null);
+  assert.equal(validateFrontendLog({ event: "page_loaded", level: "unknown" }), "level must be a valid Cloud Logging severity");
 });
 
 test("request logging assigns and echoes X-Request-Id", async (t) => {
@@ -74,6 +80,38 @@ test("POST /api/client-logs writes frontend entries and returns 204", async (t) 
   const clientLog = entries.find((entry) => entry.logType === "client_log");
   assert.equal(clientLog?.event, "button_click");
   assert.equal(clientLog?.requestId, "trace-abc");
+});
+
+test("POST /api/log-frontend writes a React frontend log and returns 200", async (t) => {
+  const entries = [];
+  const logger = createLogger({
+    writeEntry: async ({ payload }) => entries.push(payload),
+  });
+  const server = createApp(
+    { auth: {}, analyze: async () => ({}), store: {}, logger },
+    { apiRoutes: [], frontendLogger: logger },
+  ).listen(0, "127.0.0.1");
+  await new Promise((resolve) => server.once("listening", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const response = await fetch(`${base}/api/log-frontend`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      level: "WARNING",
+      event: "api_failure",
+      details: { status: 502 },
+      url: "/outfits",
+      timestamp: "2026-11-25T12:00:00.000Z",
+    }),
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { status: "logged" });
+  const frontendLog = entries.find((entry) => entry.logType === "frontend_log");
+  assert.equal(frontendLog?.severity, "WARNING");
+  assert.equal(frontendLog?.source, "ReactJS-Frontend");
+  assert.deepEqual(frontendLog?.details, { status: 502 });
 });
 
 test("logServiceCall records Gemini duration and errors", async () => {
