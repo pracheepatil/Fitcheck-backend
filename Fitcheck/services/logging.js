@@ -6,6 +6,40 @@ const requestContext = new AsyncLocalStorage();
 const CLOUD_LOG_SEVERITIES = new Set([
   "DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT", "EMERGENCY",
 ]);
+const ANALYZE_LIFECYCLE_STEPS = Object.freeze({
+  request_received: 1,
+  request_payload_received: 2,
+  image_download_started: 3,
+  image_download_completed: 3,
+  image_download_failed: 3,
+  audio_download_started: 4,
+  audio_download_completed: 4,
+  audio_download_failed: 4,
+  audio_skipped: 4,
+  submission_creation_started: 5,
+  submission_created: 5,
+  submission_creation_failed: 5,
+  gemini_analysis_started: 6,
+  gemini_analysis_completed: 6,
+  gemini_analysis_failed: 6,
+  firestore_analysis_complete_started: 7,
+  firestore_analysis_completed: 7,
+  firestore_analysis_complete_failed: 7,
+  analysis_failure_status_update_started: 8,
+  analysis_failure_status_update_completed: 8,
+  analysis_failure_status_update_failed: 8,
+  analysis_failed: 6,
+  request_completed: 9,
+  request_failed: 9,
+});
+
+function getAnalyzeLifecycleStepNumber(stage) {
+  const stepNumber = ANALYZE_LIFECYCLE_STEPS[stage];
+  if (stepNumber === undefined) {
+    throw new Error(`Unknown analyze lifecycle stage: ${stage}`);
+  }
+  return stepNumber;
+}
 
 function getRequestId() {
   return requestContext.getStore()?.requestId;
@@ -15,22 +49,29 @@ function runWithRequestContext(requestId, fn) {
   return requestContext.run({ requestId }, fn);
 }
 
-function createLogger({ projectId, logName = "fitcheck", writeEntry } = {}) {
-  let cloudLog;
-  if (!writeEntry && projectId) {
+async function writeLogSafely(logger, entry) {
+  try {
+    await logger?.write(entry);
+  } catch (error) {
     try {
-      const { Logging } = require("@google-cloud/logging");
-      cloudLog = new Logging({ projectId }).log(logName);
-    } catch {
-      cloudLog = null;
-    }
+      console.error("Log write failed:", error?.message || error);
+    } catch {}
+  }
+}
+
+function createLogger({ projectId, logName = "fitcheck", writeEntry, cloudLog: suppliedCloudLog } = {}) {
+  let cloudLog = suppliedCloudLog;
+  if (!writeEntry && !cloudLog && projectId) {
+    const { Logging } = require("@google-cloud/logging");
+    cloudLog = new Logging({ projectId }).log(logName);
   }
 
   async function write(entry) {
+    const { resource, ...entryPayload } = entry;
     const payload = {
       timestamp: new Date().toISOString(),
       requestId: entry.requestId ?? getRequestId(),
-      ...entry,
+      ...entryPayload,
     };
     const severity = entry.severity || "INFO";
     const writeStdout = () => {
@@ -44,11 +85,10 @@ function createLogger({ projectId, logName = "fitcheck", writeEntry } = {}) {
     }
     if (cloudLog) {
       try {
-         await cloudLog.write(cloudLog.entry({
+        await cloudLog.write(cloudLog.entry({
           severity,
-          ...(entry.resource ? { resource: entry.resource } : {}),
-          jsonPayload: payload,
-        }));
+          ...(resource ? { resource } : {}),
+        }, payload));
         return;
       } catch (error) {
         console.error("Cloud Logging write failed, falling back to stdout:", error.message);
@@ -62,7 +102,7 @@ function createLogger({ projectId, logName = "fitcheck", writeEntry } = {}) {
     const start = Date.now();
     try {
       const result = await fn();
-      await write({
+      await writeLogSafely({ write }, {
         logType: "service_call",
         service,
         operation,
@@ -74,7 +114,7 @@ function createLogger({ projectId, logName = "fitcheck", writeEntry } = {}) {
       });
       return result;
     } catch (error) {
-      await write({
+      await writeLogSafely({ write }, {
         logType: "service_call",
         service,
         operation,
@@ -100,13 +140,20 @@ function createRequestLoggingMiddleware(logger) {
     res.setHeader("X-Request-Id", requestId);
     const start = Date.now();
     res.on("finish", () => {
+      const routePath = req.route?.path
+        ? `${req.baseUrl || ""}${req.route.path}`
+        : req.path;
+      const severity = res.statusCode >= 500 ? "ERROR" : res.statusCode >= 400 ? "WARNING" : "INFO";
       logger.write({
         logType: "http_request",
         requestId,
+        severity,
         method: req.method,
-        path: req.originalUrl || req.url,
+        path: (req.originalUrl || req.url).split("?")[0],
+        route: routePath,
         statusCode: res.statusCode,
         durationMs: Date.now() - start,
+        responseBytes: Number(res.getHeader("content-length")) || 0,
       }).catch((error) => console.error("Failed to write request log:", error));
     });
     runWithRequestContext(requestId, () => next());
@@ -186,7 +233,6 @@ function createFrontendLogsHandler(logger) {
         logType: "frontend_log",
         source: "ReactJS-Frontend",
         severity,
-        resource: { type: "global" },
         event: event.trim(),
         details,
         url: url?.trim(),
@@ -209,5 +255,7 @@ module.exports = {
   runWithRequestContext,
   validateClientLog,
   createFrontendLogsHandler,
-  validateFrontendLog
+  validateFrontendLog,
+  getAnalyzeLifecycleStepNumber,
+  writeLogSafely,
 };

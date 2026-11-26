@@ -1,7 +1,7 @@
 const { GoogleGenAI } = require("@google/genai");
 const { BaseAgent, InMemoryRunner, createEvent, isFinalResponse } = require("@google/adk");
 const { z } = require("zod");
-const { createLogger } = require("./logging");
+const { createLogger, writeLogSafely } = require("./logging");
 
 const defaultLogger = createLogger({ projectId: process.env.GOOGLE_CLOUD_PROJECT });
 
@@ -170,18 +170,67 @@ class FeedbackTransformAgent extends BaseAgent {
   }
 }
 
-async function generateFeedback({ model, genAIClient, userId, parts, systemInstruction, schema, jsonSchema, logger = defaultLogger }) {
+async function generateFeedback({
+  model,
+  genAIClient,
+  userId,
+  parts,
+  systemInstruction,
+  schema,
+  jsonSchema,
+  logger = defaultLogger,
+  summaryLogging = false,
+}) {
+  const writeStepLog = (service, stage, fields = {}) => writeLogSafely(logger, {
+    logType: summaryLogging ? "style_tips_step" : "analyze_step",
+    service,
+    stage,
+    ...fields,
+  });
   let generated;
+  const geminiStartedAt = Date.now();
+  await writeStepLog("Gemini", "request_started", summaryLogging ? { model } : {
+    payload: {
+      model,
+      systemInstruction,
+      contents: parts.map((part) => {
+        if (part.text) return { text: part.text };
+        if (part.inlineData) {
+          return {
+            inlineData: {
+              mimeType: part.inlineData.mimeType,
+              base64Characters: part.inlineData.data.length,
+            },
+          };
+        }
+        return { fileData: { mimeType: part.fileData.mimeType } };
+      }),
+    },
+  });
   try {
-    generated = await logger.logServiceCall("Gemini", "generateContent", () => genAIClient.models.generateContent({
+    const generateContent = () => genAIClient.models.generateContent({
       model,
       contents: [{ role: "user", parts }],
       config: { systemInstruction, responseMimeType: "application/json", responseJsonSchema: jsonSchema },
-    }));
+    });
+    generated = summaryLogging
+      ? await generateContent()
+      : await logger.logServiceCall("Gemini", "generateContent", generateContent);
   } catch (error) {
+    await writeStepLog("Gemini", "request_failed", {
+      durationMs: Date.now() - geminiStartedAt,
+      errorName: error?.name || "Error",
+      ...(!summaryLogging ? { errorMessage: error?.message || String(error) } : {}),
+    });
     throw new Error("Gemini analysis failed", { cause: error });
   }
-  const rawResponse = generated.text;
+  const rawResponse = generated?.text;
+  await writeStepLog("Gemini", "response_received", {
+    durationMs: Date.now() - geminiStartedAt,
+    ...(summaryLogging
+      ? { hasResponse: typeof rawResponse === "string" && !!rawResponse.trim() }
+      : { response: typeof rawResponse === "string" ? rawResponse : { hasText: false } }),
+  });
   if (typeof rawResponse !== "string" || !rawResponse.trim()) {
     throw new Error("Gemini returned no analysis");
   }
@@ -191,16 +240,41 @@ async function generateFeedback({ model, genAIClient, userId, parts, systemInstr
     appName: "fitcheck",
   });
   let transformed;
-  for await (const event of runner.runEphemeral({
-    userId,
-    newMessage: { role: "user", parts: [{ text: rawResponse }] },
-  })) {
-    if (event.errorCode) throw new Error(`ADK feedback validation failed: ${event.errorCode}`);
-    if (isFinalResponse(event)) {
-      transformed = event.content?.parts?.map((part) => part.text || "").join("");
+  const adkStartedAt = Date.now();
+  await writeStepLog("ADK", "request_started", summaryLogging ? {} : {
+    payload: { userId, newMessage: { role: "user", parts: [{ text: rawResponse }] } },
+  });
+  try {
+    for await (const event of runner.runEphemeral({
+      userId,
+      newMessage: { role: "user", parts: [{ text: rawResponse }] },
+    })) {
+      if (event.errorCode) throw new Error(`ADK feedback validation failed: ${event.errorCode}`);
+      if (isFinalResponse(event)) {
+        transformed = event.content?.parts?.map((part) => part.text || "").join("");
+      }
     }
+  } catch (error) {
+    await writeStepLog("ADK", "request_failed", {
+      durationMs: Date.now() - adkStartedAt,
+      errorName: error?.name || "Error",
+      ...(!summaryLogging ? { errorMessage: error?.message || String(error) } : {}),
+    });
+    throw error;
   }
-  if (!transformed) throw new Error("ADK returned no validated feedback");
+  if (!transformed) {
+    const error = new Error("ADK returned no validated feedback");
+    await writeStepLog("ADK", "request_failed", {
+      durationMs: Date.now() - adkStartedAt,
+      errorName: error.name,
+      ...(!summaryLogging ? { errorMessage: error.message } : {}),
+    });
+    throw error;
+  }
+  await writeStepLog("ADK", "response_received", {
+    durationMs: Date.now() - adkStartedAt,
+    ...(summaryLogging ? { feedbackValidated: true } : { response: transformed }),
+  });
   return schema.parse(JSON.parse(transformed));
 }
 
@@ -233,7 +307,7 @@ function createAnalyzer(model, apiKey, genAIClient = new GoogleGenAI({ apiKey })
         const encodedSize = Math.ceil(image.length / 3) * 4 + Math.ceil(audio.buffer.length / 3) * 4;
         if (encodedSize <= MAX_INLINE_MEDIA_BASE64_BYTES) {
           parts.push({ inlineData: { mimeType: audioMimeType, data: audio.buffer.toString("base64") } });
-          await logger.write({ logType: "gemini_input", hasAudio: true, audioDelivery: "inline", audioMimeType });
+          await writeLogSafely(logger, { logType: "gemini_input", hasAudio: true, audioDelivery: "inline", audioMimeType });
         } else {
           let uploaded = await logger.logServiceCall("Gemini", "files.upload", () => genAIClient.files.upload({
             file: new Blob([audio.buffer], { type: audioMimeType }),
@@ -251,7 +325,7 @@ function createAnalyzer(model, apiKey, genAIClient = new GoogleGenAI({ apiKey })
             throw new Error("Gemini audio upload did not become ready");
           }
           parts.push({ fileData: { mimeType: audioMimeType, fileUri: uploaded.uri } });
-          await logger.write({ logType: "gemini_input", hasAudio: true, audioDelivery: "files_api", audioMimeType });
+          await writeLogSafely(logger, { logType: "gemini_input", hasAudio: true, audioDelivery: "files_api", audioMimeType });
         }
       }
 
@@ -285,6 +359,7 @@ function createStyleMentor(model, apiKey, genAIClient = new GoogleGenAI({ apiKey
     systemInstruction: styleMentorInstruction,
     schema: styleTipsSchema,
     jsonSchema: styleTipsJsonSchema,
+    summaryLogging: true,
   });
 }
 

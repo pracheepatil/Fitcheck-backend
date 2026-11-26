@@ -1,5 +1,6 @@
 const express = require("express");
 const { requireAuthentication } = require("../middleware/auth");
+const { getAnalyzeLifecycleStepNumber, writeLogSafely } = require("../services/logging");
 const {
   OutfitNotFoundError,
   OutfitMediaNotFoundError,
@@ -19,6 +20,23 @@ function normalizeAnalyzeBody(body) {
   delete normalized.voice;
   delete normalized.voiceNote;
   return normalized;
+}
+
+function redactAnalyzePayload(body) {
+  if (!body || typeof body !== "object") return body;
+  const payload = Array.isArray(body) ? [...body] : { ...body };
+  for (const field of ["image", "audio", "voice", "voiceNote"]) {
+    if (typeof payload[field] !== "string") continue;
+    try {
+      const url = new URL(payload[field]);
+      url.search = "";
+      url.hash = "";
+      payload[field] = url.toString();
+    } catch {
+      payload[field] = "[provided]";
+    }
+  }
+  return payload;
 }
 
 function createAnalyzeResponse(outfitId) {
@@ -43,12 +61,53 @@ function mapAnalyzeError(error, res, next) {
   return next(error);
 }
 
+function getAnalyzeErrorStatusCode(error) {
+  if (error instanceof InvalidMediaError) return 400;
+  if (error instanceof MediaFetchError) return 502;
+  if (error instanceof OutfitNotFoundError ||
+      error instanceof OutfitMediaNotFoundError ||
+      error instanceof OutfitAnalysisNotFoundError) return 404;
+  if (error instanceof OutfitDataConflictError) return 409;
+  return 500;
+}
+
 function createAnalyzeController(dependencies) {
   const analyzeService = createAnalyzeService(dependencies);
+  const logger = dependencies.logger;
   const jsonParser = express.json({ limit: "64kb" });
 
+  async function writeLifecycleLog(stage, fields = {}) {
+    if (!logger) return;
+    try {
+      await writeLogSafely(logger, {
+        logType: "analyze_lifecycle",
+        stage,
+        stepNumber: getAnalyzeLifecycleStepNumber(stage),
+        ...fields,
+      });
+    } catch (error) {
+      try {
+        console.error("Failed to prepare analyze lifecycle log:", error?.message || error);
+      } catch {}
+    }
+  }
+
+  async function writeStyleTipsLog(stage, fields = {}) {
+    await writeLogSafely(logger, {
+      logType: "style_tips_lifecycle",
+      stage,
+      ...fields,
+    });
+  }
+
+  function logAnalyzeRequest(req, res, next) {
+    writeLifecycleLog("request_received", { status: "started" }).then(() => next(), () => next());
+  }
+
   function parseJson(req, res, next) {
-    if (!req.is("application/json")) return res.status(400).json({ error: "JSON request body is required" });
+    if (!req.is("application/json")) {
+      return res.status(400).json({ error: "JSON request body is required" });
+    }
     jsonParser(req, res, (error) => {
       if (error?.type === "entity.parse.failed" || error?.type === "entity.too.large") {
         return res.status(400).json({ error: "Invalid or oversized JSON request" });
@@ -58,6 +117,9 @@ function createAnalyzeController(dependencies) {
   }
 
   async function analyzeOutfit(req, res, next) {
+    await writeLifecycleLog("request_payload_received", {
+      payload: redactAnalyzePayload(req.body),
+    });
     const body = normalizeAnalyzeBody(req.body);
     if (!body || typeof body !== "object" || Array.isArray(body) ||
         Object.keys(body).some((key) => !REQUEST_FIELDS.has(key)) ||
@@ -76,8 +138,20 @@ function createAnalyzeController(dependencies) {
         audio: body.audio,
         details: Object.fromEntries(DETAIL_FIELDS.map((key) => [key, body[key].trim()])),
       });
+      await writeLifecycleLog("request_completed", {
+        status: "completed",
+        statusCode: 201,
+        outfitId,
+      });
       return res.status(201).json(createAnalyzeResponse(outfitId));
     } catch (error) {
+      const statusCode = getAnalyzeErrorStatusCode(error);
+      await writeLifecycleLog("request_failed", {
+        status: "failed",
+        severity: statusCode >= 500 ? "ERROR" : "WARNING",
+        statusCode,
+        errorName: error?.name || "Error",
+      });
       return mapAnalyzeError(error, res, next);
     }
   }
@@ -117,6 +191,9 @@ function createAnalyzeController(dependencies) {
   async function getStyleTips(req, res, next) {
     const outfitId = req.params.outfitId;
     if (!validOutfitId(outfitId)) return res.status(400).json({ error: "Provide a valid outfitId" });
+    await writeStyleTipsLog("request_received", {
+      payload: { outfitId },
+    });
     try {
       const userId = req.user.uid;
       const outfit = await dependencies.store.getOutfit({ outfitId, userId });
@@ -125,18 +202,35 @@ function createAnalyzeController(dependencies) {
         image: photo.buffer, mimeType: photo.mimeType, userId,
         outfitName: outfit.outfitName,
       });
-      return res.set("Cache-Control", "private, no-store").json({
+      const response = {
         outfitId,
         photoUrl: `/api/outfits/${encodeURIComponent(outfitId)}/photo`,
         ...result,
+      };
+      await writeStyleTipsLog("request_completed", {
+        status: "completed",
+        statusCode: 200,
+        response: {
+          outfitId,
+          tipCount: Array.isArray(response.tips) ? response.tips.length : null,
+          bestOccasion: response.best_occasion ?? null,
+        },
       });
+      return res.set("Cache-Control", "private, no-store").json(response);
     } catch (error) {
+      const statusCode = getAnalyzeErrorStatusCode(error);
+      await writeStyleTipsLog("request_failed", {
+        status: "failed",
+        severity: statusCode >= 500 ? "ERROR" : "WARNING",
+        statusCode,
+        errorName: error?.name || "Error",
+      });
       return mapAnalyzeError(error, res, next);
     }
   }
 
   return {
-    analyzeOutfit: [requireAuthentication(dependencies.auth), parseJson, analyzeOutfit],
+    analyzeOutfit: [logAnalyzeRequest, requireAuthentication(dependencies.auth), parseJson, analyzeOutfit],
     getAnalysis: [requireAuthentication(dependencies.auth), validateIdentity, getAnalysis],
     getPhoto: [requireAuthentication(dependencies.auth), getPhoto],
     getStyleTips: [requireAuthentication(dependencies.auth), getStyleTips],

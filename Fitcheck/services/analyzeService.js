@@ -1,6 +1,7 @@
 const { resolve4 } = require("node:dns/promises");
 const https = require("node:https");
 const net = require("node:net");
+const { getAnalyzeLifecycleStepNumber, writeLogSafely } = require("./logging");
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
@@ -176,6 +177,53 @@ async function downloadMedia(value, label, maxBytes, allowedTypes, redirectCount
 }
 
 function createAnalyzeService({ analyze, store, fetchMedia = downloadMedia, logger }) {
+  async function writeLifecycleLog(stage, fields = {}) {
+    if (!logger) return;
+    try {
+      await writeLogSafely(logger, {
+        logType: "analyze_lifecycle",
+        stage,
+        stepNumber: getAnalyzeLifecycleStepNumber(stage),
+        ...fields,
+      });
+    } catch (error) {
+      try {
+        console.error("Failed to prepare analyze lifecycle log:", error?.message || error);
+      } catch {}
+    }
+  }
+
+  async function runLifecycleStep(
+    startedStage,
+    completedStage,
+    failedStage,
+    fields,
+    operation,
+    getCompletionDetails = () => ({}),
+  ) {
+    const startedAt = Date.now();
+    await writeLifecycleLog(startedStage, { ...fields, status: "started" });
+    try {
+      const result = await operation();
+      await writeLifecycleLog(completedStage, {
+        ...fields,
+        ...getCompletionDetails(result),
+        status: "completed",
+        durationMs: Date.now() - startedAt,
+      });
+      return result;
+    } catch (error) {
+      await writeLifecycleLog(failedStage, {
+        ...fields,
+        status: "failed",
+        severity: "ERROR",
+        durationMs: Date.now() - startedAt,
+        errorName: error?.name || "Error",
+      });
+      throw error;
+    }
+  }
+
   async function fetchMediaWithLogging(mediaUrl, label, maxBytes, allowedTypes) {
     if (!logger) return fetchMedia(mediaUrl, label, maxBytes, allowedTypes);
     let host;
@@ -192,14 +240,44 @@ function createAnalyzeService({ analyze, store, fetchMedia = downloadMedia, logg
     async analyzeOutfit({ userId, image, audio, details }) {
       validateMediaUrl(image, "Image");
       if (audio != null) validateMediaUrl(audio, "Audio");
-      const photoResponse = await fetchMediaWithLogging(image, "Image", MAX_IMAGE_BYTES, IMAGE_TYPES);
-      const photo = await validateMediaContent(photoResponse.buffer, "Image", MAX_IMAGE_BYTES, IMAGE_TYPES, photoResponse.contentType);
-      const audioResponse = audio == null ? undefined : await fetchMediaWithLogging(audio, "Audio", MAX_AUDIO_BYTES, AUDIO_TYPES);
-      const voice = audioResponse && await validateMediaContent(
-        audioResponse.buffer, "Audio", MAX_AUDIO_BYTES, AUDIO_TYPES, audioResponse.contentType,
+
+      const photoResponse = await runLifecycleStep(
+        "image_download_started",
+        "image_download_completed",
+        "image_download_failed",
+        { mediaType: "image" },
+        () => fetchMediaWithLogging(image, "Image", MAX_IMAGE_BYTES, IMAGE_TYPES),
       );
+      const photo = await validateMediaContent(
+        photoResponse.buffer,
+        "Image",
+        MAX_IMAGE_BYTES,
+        IMAGE_TYPES,
+        photoResponse.contentType,
+      );
+
+      let voice;
+      if (audio == null) {
+        await writeLifecycleLog("audio_skipped", { status: "skipped", reason: "not_provided" });
+      } else {
+        const audioResponse = await runLifecycleStep(
+          "audio_download_started",
+          "audio_download_completed",
+          "audio_download_failed",
+          { mediaType: "audio" },
+          () => fetchMediaWithLogging(audio, "Audio", MAX_AUDIO_BYTES, AUDIO_TYPES),
+        );
+        voice = await validateMediaContent(
+          audioResponse.buffer,
+          "Audio",
+          MAX_AUDIO_BYTES,
+          AUDIO_TYPES,
+          audioResponse.contentType,
+        );
+      }
+
       if (logger) {
-        await logger.write({
+        await writeLogSafely(logger, {
           logType: "analyze_input",
           hasAudio: !!voice,
           audioMimeType: voice?.mimeType,
@@ -208,21 +286,66 @@ function createAnalyzeService({ analyze, store, fetchMedia = downloadMedia, logg
           imageBytes: photo.buffer.length,
         });
       }
-      const outfitId = await store.createSubmission({
-        userId, image: photo.buffer, mimeType: photo.mimeType, ...details, audio: voice,
-      });
+
+      const outfitId = await runLifecycleStep(
+        "submission_creation_started",
+        "submission_created",
+        "submission_creation_failed",
+        {
+          hasAudio: !!voice,
+          payload: {
+            userId,
+            ...details,
+            image: { mimeType: photo.mimeType, bytes: photo.buffer.length },
+            audio: voice ? { mimeType: voice.mimeType, bytes: voice.buffer.length } : null,
+          },
+        },
+        () => store.createSubmission({
+          userId, image: photo.buffer, mimeType: photo.mimeType, ...details, audio: voice,
+        }),
+        (createdOutfitId) => ({ outfitId: createdOutfitId }),
+      );
       try {
-        const analysis = await analyze({
-          image: photo.buffer, mimeType: photo.mimeType, userId,
-          outfitName: details.outfitName, occasion: details.occasion, category: details.category, audio: voice,
-        });
-        await store.completeAnalysis({ outfitId, userId, analysis });
+        const analysis = await runLifecycleStep(
+          "gemini_analysis_started",
+          "gemini_analysis_completed",
+          "gemini_analysis_failed",
+          { outfitId },
+          () => analyze({
+            image: photo.buffer, mimeType: photo.mimeType, userId,
+            outfitName: details.outfitName, occasion: details.occasion, category: details.category, audio: voice,
+          }),
+        );
+        await runLifecycleStep(
+          "firestore_analysis_complete_started",
+          "firestore_analysis_completed",
+          "firestore_analysis_complete_failed",
+          {
+            outfitId,
+            payload: { outfitId, userId, analysis },
+          },
+          () => store.completeAnalysis({ outfitId, userId, analysis }),
+          (response) => ({ response }),
+        );
       } catch (error) {
+        await writeLifecycleLog("analysis_failed", {
+          outfitId,
+          status: "failed",
+          severity: "ERROR",
+          errorName: error?.name || "Error",
+        });
         try {
-          await store.failAnalysis({ outfitId, userId });
+          await runLifecycleStep(
+            "analysis_failure_status_update_started",
+            "analysis_failure_status_update_completed",
+            "analysis_failure_status_update_failed",
+            { outfitId },
+            () => store.failAnalysis({ outfitId, userId }),
+          );
         } catch (statusError) {
           throw new AggregateError([error, statusError], `Analysis failed and status could not be updated for ${outfitId}`);
         }
+
         throw error;
       }
       return outfitId;

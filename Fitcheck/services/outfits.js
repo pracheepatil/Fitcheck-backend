@@ -464,7 +464,7 @@ function createOutfitStore(db, bucket) {
       const analysisId = randomUUID();
       const scoreId = randomUUID();
       const now = new Date();
-      await db.runTransaction(async (transaction) => {
+      return db.runTransaction(async (transaction) => {
         const details = await transaction.get(detailsRef);
         if (!details.exists || details.data().userId !== userId) throw new OutfitNotFoundError();
         if (details.data().status !== "pending") throw new OutfitDataConflictError();
@@ -480,6 +480,7 @@ function createOutfitStore(db, bucket) {
           score_id: scoreId, analysis_id: analysisId, ...scores, created_at: now,
         });
         transaction.update(detailsRef, { status: "uploaded" });
+        return { outfitId, analysisId, scoreId, status: "uploaded" };
       });
     },
 
