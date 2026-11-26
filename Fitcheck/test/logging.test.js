@@ -7,6 +7,7 @@ const {
   validateClientLog,
   validateFrontendLog,
   runWithRequestContext,
+  getAnalyzeLifecycleStepNumber,
 } = require("../services/logging");
 
 test("validateClientLog accepts required fields", () => {
@@ -21,6 +22,43 @@ test("validateClientLog accepts required fields", () => {
 test("validateFrontendLog validates Cloud Logging payloads", () => {
   assert.equal(validateFrontendLog({ event: "page_loaded", level: "warning", url: "/home" }), null);
   assert.equal(validateFrontendLog({ event: "page_loaded", level: "unknown" }), "level must be a valid Cloud Logging severity");
+});
+
+test("analyze lifecycle stages have stable sequential step numbers", () => {
+  assert.equal(getAnalyzeLifecycleStepNumber("request_received"), 1);
+  assert.equal(getAnalyzeLifecycleStepNumber("request_payload_received"), 2);
+  assert.equal(getAnalyzeLifecycleStepNumber("gemini_analysis_started"), 6);
+  assert.equal(getAnalyzeLifecycleStepNumber("firestore_analysis_completed"), 7);
+  assert.equal(getAnalyzeLifecycleStepNumber("request_completed"), 9);
+  assert.throws(
+    () => getAnalyzeLifecycleStepNumber("unknown_stage"),
+    /Unknown analyze lifecycle stage/,
+  );
+});
+
+test("Cloud Logging receives severity as metadata and the payload as JSON data", async () => {
+  const entries = [];
+  const cloudLog = {
+    entry(metadata, data) {
+      return { metadata, data };
+    },
+    async write(entry) {
+      entries.push(entry);
+    },
+  };
+  const logger = createLogger({ cloudLog });
+
+  await logger.write({
+    logType: "frontend_log",
+    severity: "WARNING",
+    event: "api_failure",
+  });
+
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].metadata.severity, "WARNING");
+  assert.equal(entries[0].data.logType, "frontend_log");
+  assert.equal(entries[0].data.event, "api_failure");
+  assert.equal("resource" in entries[0].data, false);
 });
 
 test("request logging assigns and echoes X-Request-Id", async (t) => {
@@ -42,6 +80,14 @@ test("request logging assigns and echoes X-Request-Id", async (t) => {
   assert.equal(httpLog?.requestId, generatedId);
   assert.equal(httpLog?.method, "GET");
   assert.equal(httpLog?.statusCode, 200);
+  assert.equal(httpLog?.severity, "INFO");
+
+  const notFound = await fetch(`${base}/missing?token=do-not-log`);
+  assert.equal(notFound.status, 404);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const notFoundLog = entries.find((entry) => entry.logType === "http_request" && entry.statusCode === 404);
+  assert.equal(notFoundLog?.path, "/missing");
+  assert.equal(notFoundLog?.severity, "WARNING");
 
   const suppliedId = "client-supplied-request-id";
   const withHeader = await fetch(`${base}/api/health`, { headers: { "X-Request-Id": suppliedId } });
@@ -136,6 +182,31 @@ test("logServiceCall records Gemini duration and errors", async () => {
   );
   assert.equal(entries[1].status, "error");
   assert.equal(entries[1].error, "boom");
+});
+
+test("logServiceCall does not let failed log writes affect the service result", async () => {
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    const logger = createLogger({
+      writeEntry: async () => {
+        throw new Error("logging unavailable");
+      },
+    });
+
+    assert.equal(
+      await logger.logServiceCall("Gemini", "generateContent", async () => "ok"),
+      "ok",
+    );
+    await assert.rejects(
+      () => logger.logServiceCall("Gemini", "generateContent", async () => {
+        throw new Error("Gemini failed");
+      }),
+      /Gemini failed/,
+    );
+  } finally {
+    console.error = originalError;
+  }
 });
 
 test("createClientLogsHandler rejects invalid payload before writing", async () => {

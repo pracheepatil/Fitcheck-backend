@@ -119,6 +119,22 @@ The request waits for analysis to finish and returns `201` with exactly:
 { "status": "success", "outfitId": "generated-uuid" }
 ```
 
+Each `/analyze` request writes `analyze_lifecycle` entries for the request
+payload, media downloads, submission creation, Gemini analysis, Firestore
+completion, and the final outcome. Separate `analyze_step` entries include the
+Gemini and ADK call payloads and responses. The Firestore completion entry
+includes the analysis write payload and commit result. Media bytes are not
+logged; media URL query strings and fragments are removed from the request
+payload. All events for a request share the `X-Request-Id` response header.
+Logging is best-effort: a log write failure does not fail the analysis request.
+In Cloud Logging Logs Explorer, filter by the response's request ID:
+
+```text
+resource.type="cloud_run_revision"
+jsonPayload.logType="analyze_lifecycle"
+jsonPayload.requestId="REQUEST_ID_FROM_X_REQUEST_ID"
+```
+
 For example:
 
 ```json
@@ -304,7 +320,10 @@ it returns an empty array when the user has no favourites.
 `POST /api/log-frontend` writes a React frontend event to the
 `react-frontend-logs` Cloud Logging log. `event` is required; `level` defaults
 to `INFO` and accepts standard Cloud Logging severities. `details`, `url`, and
-an ISO-8601 `timestamp` are optional.
+an ISO-8601 `timestamp` are optional. The Cloud Run service account needs
+`roles/logging.logWriter` in the project used by `GOOGLE_CLOUD_PROJECT`.
+If the Cloud Logging API write fails, entries are emitted as structured JSON
+to stdout so Cloud Run can still collect them.
 
 ```sh
 curl -X POST "$BASE_URL/api/log-frontend" \
@@ -467,10 +486,11 @@ environment variables rather than `latest`.
 The specified runtime service account needs Firestore read/write access
 (`roles/datastore.user`), Storage object read/create/delete on the specific
 bucket (`roles/storage.objectUser`), Firebase Auth user read for revoked-token
-checks (and create/delete if signup is used), and `roles/secretmanager.secretAccessor`
-on the relevant secrets. Gemini Developer API access uses its API key. Verify
-effective permissions and Secret Manager bindings before deployment; this
-repository does not grant IAM permissions.
+checks (and create/delete if signup is used), `roles/logging.logWriter` in the
+Cloud Logging project, and `roles/secretmanager.secretAccessor` on the relevant
+secrets. Gemini Developer API access uses its API key. Verify effective
+permissions and Secret Manager bindings before deployment; this repository
+does not grant IAM permissions.
 
 ```sh
 cd Fitcheck

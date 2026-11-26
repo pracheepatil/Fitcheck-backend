@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const { createApp } = require("../app");
 const { createOutfitStore } = require("../services/outfits");
 const { createAnalyzer, createStyleMentor } = require("../services/gemini");
+const { createLogger } = require("../services/logging");
 const https = require("node:https");
 const { EventEmitter } = require("node:events");
 const { Readable } = require("node:stream");
@@ -147,7 +148,7 @@ async function setup(t, analyze = async () => analysis, fetchMedia = async (_url
   ],
   best_occasion: "Everyday",
   occasion_reason: "The look is versatile for daily wear.",
-})) {
+}), logger) {
   const db = fakeFirestore();
   const bucket = fakeBucket();
   const auth = {
@@ -156,7 +157,8 @@ async function setup(t, analyze = async () => analysis, fetchMedia = async (_url
       return { uid: token };
     },
   };
-  const server = createApp({ auth, analyze, fetchMedia, styleMentor, store: createOutfitStore(db, bucket) }).listen(0, "127.0.0.1");
+  const server = createApp({ auth, analyze, fetchMedia, styleMentor, logger, store: createOutfitStore(db, bucket) })
+    .listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
   return { db, bucket, url: `http://127.0.0.1:${server.address().port}/api` };
@@ -228,6 +230,33 @@ test("generates style tips for an owned photo without saving results", async (t)
   assert.equal((await fetch(path, { headers: { Authorization: "Bearer alice" } })).status, 404);
 });
 
+test("logs concise style tips request and success details", async (t) => {
+  const entries = [];
+  const logger = createLogger({
+    writeEntry: async ({ payload: entry }) => entries.push(entry),
+  });
+  const { url } = await setup(t, undefined, undefined, undefined, logger);
+  const { outfitId } = await (await post(url, payload())).json();
+  const response = await fetch(`${url}/outfits/${outfitId}/style-tips`, {
+    headers: { Authorization: "Bearer alice" },
+  });
+  assert.equal(response.status, 200);
+
+  const lifecycleEntries = entries.filter((entry) => entry.logType === "style_tips_lifecycle");
+  assert.deepEqual(lifecycleEntries.map((entry) => entry.stage), [
+    "request_received",
+    "request_completed",
+  ]);
+  assert.deepEqual(lifecycleEntries[0].payload, { outfitId });
+  assert.deepEqual(lifecycleEntries[1].response, {
+    outfitId,
+    tipCount: 5,
+    bestOccasion: "Everyday",
+  });
+  assert.ok(!JSON.stringify(lifecycleEntries).includes("Try a jacket."));
+  assert.ok(lifecycleEntries.every((entry) => entry.requestId === response.headers.get("x-request-id")));
+});
+
 test("style tips report a model failure without saving feedback", async (t) => {
   const { db, url } = await setup(t, undefined, undefined, async () => { throw new Error("AI unavailable"); });
   const { outfitId } = await (await post(url, payload())).json();
@@ -242,6 +271,8 @@ test("style tips report a model failure without saving feedback", async (t) => {
 
 test("style mentor sends image and context to Gemini and validates its response through ADK", async () => {
   let request;
+  const entries = [];
+  const logger = { write: async (entry) => entries.push(entry) };
   const client = {
     models: {
       generateContent: async (input) => {
@@ -262,7 +293,7 @@ test("style mentor sends image and context to Gemini and validates its response 
       },
     },
   };
-  const mentor = createStyleMentor("fake", "unused", client);
+  const mentor = createStyleMentor("fake", "unused", client, logger);
   assert.deepEqual(await mentor({
     image: png, mimeType: "image/png", userId: "alice",
     outfitName: "Look", occasion: "Work", category: "Casual",
@@ -283,8 +314,22 @@ test("style mentor sends image and context to Gemini and validates its response 
   assert.match(request.contents[0].parts[0].text, /exactly 5 general styling tips/);
   assert.doesNotMatch(request.contents[0].parts[0].text, /"occasion":"Work"/);
   assert.equal(request.contents[0].parts[1].inlineData.data, png.toString("base64"));
+  assert.deepEqual(entries.map(({ service, stage }) => [service, stage]), [
+    ["Gemini", "request_started"],
+    ["Gemini", "response_received"],
+    ["ADK", "request_started"],
+    ["ADK", "response_received"],
+  ]);
+  assert.ok(!JSON.stringify(entries).includes(png.toString("base64")));
+  assert.ok(!JSON.stringify(entries).includes("Try a blue jacket."));
   client.models.generateContent = async () => ({ text: '{"tips":["Only one"]}' });
   await assert.rejects(mentor({ image: png, mimeType: "image/png", userId: "alice" }), /ADK feedback validation failed/);
+  assert.deepEqual(entries.slice(-4).map(({ service, stage }) => [service, stage]), [
+    ["Gemini", "request_started"],
+    ["Gemini", "response_received"],
+    ["ADK", "request_started"],
+    ["ADK", "request_failed"],
+  ]);
 });
 
 test("getAverageAnalysis returns only the authenticated user's uploaded outfit averages and saved inspirations", async (t) => {
@@ -954,6 +999,103 @@ test("takes image and optional audio URLs from req.body and passes occasion/cate
   assert.deepEqual(bucket.files.get(saved.media.AudioStoragePath), m4a);
 });
 
+test("records /analyze inputs and service steps without logging validation steps", async (t) => {
+  const entries = [];
+  const logger = createLogger({
+    writeEntry: async ({ payload: entry }) => entries.push(entry),
+  });
+  const { url } = await setup(t, undefined, undefined, undefined, logger);
+  const response = await post(url, payload({
+    image: `${imageUrl}?token=image-secret`,
+    audio: `${audioUrl}?token=audio-secret`,
+  }));
+  assert.equal(response.status, 201);
+
+  const requestId = response.headers.get("x-request-id");
+  assert.ok(requestId);
+  const lifecycleEntries = entries.filter((entry) => entry.logType === "analyze_lifecycle");
+  assert.deepEqual(lifecycleEntries.map((entry) => entry.stage), [
+    "request_received",
+    "request_payload_received",
+    "image_download_started",
+    "image_download_completed",
+    "audio_download_started",
+    "audio_download_completed",
+    "submission_creation_started",
+    "submission_created",
+    "gemini_analysis_started",
+    "gemini_analysis_completed",
+    "firestore_analysis_complete_started",
+    "firestore_analysis_completed",
+    "request_completed",
+  ]);
+  assert.ok(lifecycleEntries.every((entry) => entry.requestId === requestId));
+  const requestPayload = lifecycleEntries.find((entry) => entry.stage === "request_payload_received").payload;
+  assert.equal(requestPayload.outfitName, "Weekend");
+  assert.equal(requestPayload.image, imageUrl);
+  assert.equal(requestPayload.audio, audioUrl);
+  assert.ok(lifecycleEntries.some((entry) =>
+    entry.stage === "submission_created" && typeof entry.outfitId === "string"));
+  const firestoreLog = lifecycleEntries.find((entry) => entry.stage === "firestore_analysis_completed");
+  assert.deepEqual(firestoreLog.payload.analysis, analysis);
+  assert.equal(firestoreLog.response.status, "uploaded");
+  assert.equal(lifecycleEntries.at(-1).statusCode, 201);
+  assert.ok(!JSON.stringify(lifecycleEntries).includes("image-secret"));
+  assert.ok(!JSON.stringify(lifecycleEntries).includes("audio-secret"));
+});
+
+test("does not add validation entries to /analyze logs", async (t) => {
+  const entries = [];
+  const logger = createLogger({
+    writeEntry: async ({ payload: entry }) => entries.push(entry),
+  });
+  const { url } = await setup(t, undefined, undefined, undefined, logger);
+
+  const unauthorized = await fetch(`${url}/analyze`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload()),
+  });
+  assert.equal(unauthorized.status, 401);
+
+  const invalidPayload = await post(url, { image: imageUrl });
+  assert.equal(invalidPayload.status, 400);
+
+  const lifecycleEntries = entries.filter((entry) => entry.logType === "analyze_lifecycle");
+  const unauthorizedId = unauthorized.headers.get("x-request-id");
+  const invalidPayloadId = invalidPayload.headers.get("x-request-id");
+  assert.deepEqual(
+    lifecycleEntries
+      .filter((entry) => entry.requestId === unauthorizedId)
+      .map((entry) => entry.stage),
+    ["request_received"],
+  );
+  assert.deepEqual(
+    lifecycleEntries
+      .filter((entry) => entry.requestId === invalidPayloadId)
+      .map((entry) => entry.stage),
+    ["request_received", "request_payload_received"],
+  );
+});
+
+test("/analyze succeeds when Google Cloud log writes fail", async (t) => {
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    const logger = createLogger({
+      writeEntry: async () => {
+        throw new Error("Cloud Logging unavailable");
+      },
+    });
+    const { url } = await setup(t, undefined, undefined, undefined, logger);
+    const response = await post(url, payload());
+    assert.equal(response.status, 201);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  } finally {
+    console.error = originalError;
+  }
+});
+
 test("keeps analysis results associated with each submission's occasion and category", async (t) => {
   const { url } = await setup(t, async ({ occasion, category }) => ({
     ...analysis, summary: `${occasion} / ${category}`,
@@ -1015,6 +1157,10 @@ test("rejects downloaded files with unsupported signatures or oversized content 
 
 test("passes occasion and category to the Gemini model as context", async () => {
   const requests = [];
+  const logEntries = [];
+  const logger = createLogger({
+    writeEntry: async ({ payload: entry }) => logEntries.push(entry),
+  });
   const fakeGemini = {
     models: {
       generateContent: async (input) => {
@@ -1024,7 +1170,7 @@ test("passes occasion and category to the Gemini model as context", async () => 
     },
     files: {},
   };
-  const analyze = createAnalyzer("fake", "unused", fakeGemini);
+  const analyze = createAnalyzer("fake", "unused", fakeGemini, logger);
   const result = await analyze({
     image: png, mimeType: "image/png", userId: "alice", outfitName: "Blue blazer",
     occasion: "Job Interview", category: "Formal", audio: { buffer: webm, mimeType: "audio/webm" },
@@ -1065,6 +1211,36 @@ test("passes occasion and category to the Gemini model as context", async () => 
   assert.deepEqual(thirdParts.find((part) => part.inlineData?.mimeType === "audio/m4a").inlineData, {
     mimeType: "audio/m4a", data: m4a.toString("base64"),
   });
+  assert.ok(logEntries.some((entry) =>
+    entry.logType === "analyze_step" && entry.service === "Gemini" && entry.stage === "response_received"));
+  assert.ok(logEntries.some((entry) =>
+    entry.logType === "analyze_step" && entry.service === "ADK" && entry.stage === "response_received"));
+});
+
+test("Gemini and ADK analysis continue when their log writes fail", async () => {
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    const logger = createLogger({
+      writeEntry: async () => {
+        throw new Error("Cloud Logging unavailable");
+      },
+    });
+    const fakeGemini = {
+      models: {
+        generateContent: async () => ({ text: JSON.stringify(analysis) }),
+      },
+      files: {},
+    };
+    const result = await createAnalyzer("fake", "unused", fakeGemini, logger)({
+      image: png,
+      mimeType: "image/png",
+      userId: "alice",
+    });
+    assert.deepEqual(result, analysis);
+  } finally {
+    console.error = originalError;
+  }
 });
 
 test("uploads large audio to Gemini and removes the temporary file", async () => {
@@ -1180,10 +1356,27 @@ test("persists pending submission before analysis, then completes it", async (t)
 });
 
 test("exposes failed status and no partial analysis when AI fails", async (t) => {
-  const { db, bucket, url } = await setup(t, async () => { throw new Error("AI unavailable"); });
+  const entries = [];
+  const logger = createLogger({
+    writeEntry: async ({ payload: entry }) => entries.push(entry),
+  });
+  const { db, bucket, url } = await setup(
+    t,
+    async () => { throw new Error("AI unavailable"); },
+    undefined,
+    undefined,
+    logger,
+  );
   const response = await post(url, payload());
   assert.equal(response.status, 500);
   assert.deepEqual(await response.json(), { error: "Internal server error" });
+  const stages = entries
+    .filter((entry) => entry.logType === "analyze_lifecycle")
+    .map((entry) => entry.stage);
+  assert.ok(stages.includes("gemini_analysis_failed"));
+  assert.ok(stages.includes("analysis_failure_status_update_started"));
+  assert.ok(stages.includes("analysis_failure_status_update_completed"));
+  assert.ok(stages.includes("request_failed"));
   const [path] = [...db.records.entries()].find(([key]) => key.startsWith("fitcheck_outfit_details/"));
   const id = path.split("/")[1];
   assert.equal(db.records.size, 2);

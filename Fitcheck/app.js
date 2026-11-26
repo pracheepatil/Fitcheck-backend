@@ -31,8 +31,20 @@ function createApp(dependencies, { apiRoutes = [], logger, frontendLogger } = {}
     res.json({ success: true, message: "FitCheck backend is running" });
   });
   app.use((err, req, res, next) => {
-    console.error("Request failed:", err);
+    console.error("Request failed:", {
+      errorName: err?.name || "Error",
+      statusCode: err?.statusCode || 500,
+    });
     if (res.headersSent) return next(err);
+    activeLogger.write({
+      logType: "http_error",
+      severity: "ERROR",
+      method: req.method,
+      path: req.path,
+      route: req.route?.path ? `${req.baseUrl || ""}${req.route.path}` : req.path,
+      statusCode: 500,
+      errorName: err?.name || "Error",
+    }).catch((loggingError) => console.error("Failed to write request error log:", loggingError));
     res.status(500).json({ error: "Internal server error" });
   });
   return app;
